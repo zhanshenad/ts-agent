@@ -139,17 +139,30 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 | `smart`（智能，默认） | 只读命令（`ls`/`cat`/`git status`/`npm test`…）直接跑，其余一律确认 |
 | `auto`（自动） | 全部直接跑 |
 
-判定逻辑在 `src/permissions.ts`：先匹配危险模式（`rm`、`del`、重定向 `>`、`git push`、`npm install`、管道进 shell…），**任何片段命中即危险**；再要求整条命令命中只读白名单才算安全；两者都不匹配按危险处理（保守）。
+判定逻辑在 `src/permissions.ts`：
+
+1. 按 `&&`、`||`、`;`、`|` 把命令拆成多段（引号内不拆，`2>&1` 不拆）
+2. 先剔除无害重定向：`>nul`、`> /dev/null`、`2>&1` 只是丢弃输出，不算写文件
+3. 任何一段命中危险模式（`rm`、`del`、`>` 写文件、`git push`、`npm install`、`| sh`、`find -delete`、`sort -o`…）→ 整条危险
+4. **每一段**都命中只读白名单 → 整条安全
+5. 其余一律按危险处理（保守）
+
+所以这种链式只读命令在智能模式下直接放行，不会再弹确认：
+
+```
+cd /d "D:\proj\src" && chcp 65001 >nul && type service\impl\X.java | more +0 && echo ====
+```
 
 权限上限由服务端掌握，浏览器只能往下调：
 
 ```bash
-node dist/server.js --max-mode smart     # 默认：前端最多能选到「智能」
-node dist/server.js --max-mode auto      # 放开「自动」，自担风险
+npm run serve                            # 默认 --max-mode smart
+npm run serve:auto                       # 放开到 auto（自担风险）
 node dist/server.js --max-mode strict    # 只允许「严格」和「关闭」
 ```
 
 - 请求里的 `mode` 会被 `clampMode()` 夹到上限，`start` 事件返回实际生效的 `mode`
+- 页面上超出上限的选项会显示成「自动（需 --max-mode auto）」，点它会在状态栏直接告诉你原因，而不是默默灰掉
 - **非本机访问一律强制 `strict`**，避免局域网里有人直接把 shell 开到 auto
 - CLI 默认 `strict`；`--mode smart|auto|off` 可改，`--yes` 等价于 `auto`
 

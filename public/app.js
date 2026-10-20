@@ -23,13 +23,16 @@ function applyMaxMode(max) {
   maxMode = max;
   for (const opt of els.mode.options) {
     const over = (MODE_RANK[opt.value] ?? 9) > (MODE_RANK[max] ?? 0);
-    opt.disabled = over;
-    opt.title = over ? `服务器上限是「${MODE_LABELS[max] ?? max}」` : "";
+    const base = MODE_LABELS[opt.value] ?? opt.value;
+    opt.disabled = false;
+    opt.textContent = over ? `${base}（需 --max-mode ${opt.value}）` : base;
+    opt.title = over ? `服务端上限是「${MODE_LABELS[max] ?? max}」` : "";
   }
   if ((MODE_RANK[state.mode] ?? 9) > (MODE_RANK[max] ?? 0)) {
     state.mode = max;
-    els.mode.value = max;
+    localStorage.setItem("tsagent.mode", max);
   }
+  els.mode.value = state.mode;
   els.mode.classList.toggle("warn", state.mode !== "smart");
 }
 
@@ -897,7 +900,16 @@ els.model.addEventListener("change", () => {
 });
 
 els.mode.addEventListener("change", () => {
-  state.mode = els.mode.value;
+  const wanted = els.mode.value;
+  if ((MODE_RANK[wanted] ?? 9) > (MODE_RANK[maxMode] ?? 0)) {
+    els.mode.value = state.mode;
+    setStatus(
+      `服务端上限是「${MODE_LABELS[maxMode]}」。要用「${MODE_LABELS[wanted]}」，请以 --max-mode ${wanted} 重启服务。`,
+      true,
+    );
+    return;
+  }
+  state.mode = wanted;
   localStorage.setItem("tsagent.mode", state.mode);
   els.mode.classList.toggle("warn", state.mode !== "smart");
   setStatus(`命令权限：${MODE_LABELS[state.mode] ?? state.mode}`);

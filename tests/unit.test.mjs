@@ -403,6 +403,39 @@ describe("classifyCommand", () => {
   test("unknown commands are conservative", () => {
     assert.equal(classifyCommand("some-random-binary --flag"), "dangerous");
   });
+
+  test("splits on && ; and pipes, judging every segment", () => {
+    const real =
+      'cd /d "D:\\work\\proj\\src\\main\\java" && chcp 65001 >nul && ' +
+      "type service\\impl\\FeedServiceImpl.java | more +0 && " +
+      "echo ===== && type service\\impl\\BlogServiceImpl.java | more +0";
+    assert.equal(classifyCommand(real), "safe", "a chain of read-only commands is safe");
+  });
+
+  test("silencing redirects are not writes", () => {
+    assert.equal(classifyCommand("chcp 65001 >nul"), "safe");
+    assert.equal(classifyCommand("ls > /dev/null"), "safe");
+    assert.equal(classifyCommand("node -v 2>&1"), "safe");
+  });
+
+  test("real redirects still count as writes", () => {
+    assert.equal(classifyCommand("echo hi > out.txt"), "dangerous");
+    assert.equal(classifyCommand("echo hi >> log.txt"), "dangerous");
+  });
+
+  test("piping into a shell stays dangerous", () => {
+    assert.equal(classifyCommand("type a.txt | sh"), "dangerous");
+    assert.equal(classifyCommand("cat x | bash -s"), "dangerous");
+  });
+
+  test("find -delete and sort -o are destructive", () => {
+    assert.equal(classifyCommand("find . -name '*.log' -delete"), "dangerous");
+    assert.equal(classifyCommand("sort data.txt -o out.txt"), "dangerous");
+  });
+
+  test("separators inside quotes do not split", () => {
+    assert.equal(classifyCommand('echo "a && b"'), "safe");
+  });
 });
 
 describe("mode resolution", () => {
