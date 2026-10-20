@@ -1,9 +1,10 @@
 import type { Config } from "./config.js";
-import { chatCompletion } from "./llm.js";
+import { chatCompletion, chatCompletionStream } from "./llm.js";
 import type { Session, SessionStore } from "./session.js";
 import type {
   AgentHooks,
   ChatMessage,
+  ToolCall,
   ToolContext,
   ToolRegistry,
   ToolResult,
@@ -90,43 +91,65 @@ export class Agent {
     };
   }
 
-  async run(input: string): Promise<string> {
+  /**
+   * Run one user turn to completion.
+   * Pass `onDelta` to stream assistant text as it arrives; the tool loop is
+   * identical either way, so a streaming caller keeps full agent behaviour.
+   */
+  async run(input: string, onDelta?: (text: string) => void): Promise<string> {
     this.refreshSystem();
     this.messages.push({ role: "user", content: input });
     this.opts.store.save(this.current);
 
     const tools = [...this.opts.tools.values()].map((t) => t.spec);
     const maxIterations = this.opts.maxIterations ?? this.opts.config.maxIterations;
+    const streaming = typeof onDelta === "function";
     let lastText = "";
 
     for (let i = 0; i < maxIterations; i++) {
       this.hooks.onIteration?.(i);
 
-      const result = await chatCompletion(
-        this.opts.config,
-        this.messages,
-        tools,
-        { signal: this.signal() },
-      );
+      let content = "";
+      let toolCalls: ToolCall[] = [];
+
+      if (streaming) {
+        for await (const event of chatCompletionStream(this.opts.config, this.messages, {
+          signal: this.signal(),
+          tools,
+        })) {
+          if (event.type === "text") {
+            content += event.text;
+            onDelta!(event.text);
+          } else {
+            toolCalls = event.toolCalls;
+          }
+        }
+      } else {
+        const result = await chatCompletion(this.opts.config, this.messages, tools, {
+          signal: this.signal(),
+        });
+        content = result.content ?? "";
+        toolCalls = result.toolCalls;
+      }
 
       const assistant: ChatMessage = {
         role: "assistant",
-        content: result.content ?? null,
+        content: content || null,
       };
-      if (result.toolCalls.length) assistant.tool_calls = result.toolCalls;
+      if (toolCalls.length) assistant.tool_calls = toolCalls;
       this.messages.push(assistant);
 
-      if (result.content && result.content.trim()) {
-        lastText = result.content;
-        this.hooks.onAssistantText(result.content);
+      if (content.trim()) {
+        lastText = content;
+        if (!streaming) this.hooks.onAssistantText(content);
       }
 
-      if (!result.toolCalls.length) {
+      if (!toolCalls.length) {
         this.opts.store.save(this.current);
-        return (result.content ?? lastText).trim();
+        return (content || lastText).trim();
       }
 
-      for (const call of result.toolCalls) {
+      for (const call of toolCalls) {
         const name = call.function.name;
         const tool = this.opts.tools.get(name);
 

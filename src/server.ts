@@ -2,8 +2,10 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { Agent } from "./agent.js";
 import type { Config } from "./config.js";
 import { chatCompletion, chatCompletionStream, LLMError } from "./llm.js";
 import {
@@ -18,10 +20,18 @@ import {
   validateModelInput,
   type ModelEntry,
 } from "./models.js";
+import { buildSystemPrompt } from "./prompt.js";
+import { SessionStore } from "./session.js";
+import { scanSkills } from "./skills.js";
+import { createToolRegistry } from "./tools/index.js";
 import type { ChatMessage } from "./types.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
+/** Sessions / skills / memory live here. Tests point this at a temp dir. */
+const STATE_DIR = process.env.TSA_STATE_DIR
+  ? path.resolve(process.env.TSA_STATE_DIR)
+  : path.join(ROOT, ".tsagent");
 const MAX_BODY = 1_000_000;
 const MAX_MESSAGES = 200;
 const MAX_CONTENT = 100_000;
@@ -74,10 +84,10 @@ function configFor(entry: ModelEntry, temperature?: number): Config {
     apiKey: key || (entry.requiresKey === false ? "local-no-key" : ""),
     model: entry.model,
     temperature: temperature ?? entry.temperature ?? 0.7,
-    maxIterations: 1,
+    maxIterations: Number(process.env.TSA_MAX_ITERATIONS ?? "12") || 12,
     maxTokens: undefined,
     workspace: ROOT,
-    homeDir: path.join(ROOT, ".tsagent"),
+    homeDir: STATE_DIR,
     autoApprove: false,
   };
 }
@@ -136,72 +146,188 @@ const SSE_HEADERS = {
   "x-accel-buffering": "no",
 };
 
-/** POST /api/chat ?streams {type:"delta"|"done"|"error"} frames. */
+/* ---------------- agent runtime for the web UI ---------------- */
+
+const sessionStore = new SessionStore(path.join(STATE_DIR, "sessions"));
+const agentSkills = scanSkills(path.join(STATE_DIR, "skills"));
+const approvals = new Map<string, (approved: boolean) => void>();
+const busySessions = new Set<string>();
+const APPROVAL_TIMEOUT_MS = 120_000;
+
+type Emit = (event: unknown) => void;
+
+/** Ask the browser to approve a destructive tool call; resolves on its answer. */
+function requestApproval(emit: Emit, action: string, detail?: string): Promise<boolean> {
+  const id = randomUUID();
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      approvals.delete(id);
+      emit({ type: "approval_timeout", approvalId: id });
+      resolve(false);
+    }, APPROVAL_TIMEOUT_MS);
+
+    approvals.set(id, (approved) => {
+      clearTimeout(timer);
+      resolve(approved);
+    });
+
+    emit({ type: "approval", approvalId: id, action, detail: detail ?? "" });
+  });
+}
+
+/** POST /api/chat/approve — the browser's answer to an approval prompt. */
+async function handleApprove(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  let body: { approvalId?: string; approved?: boolean };
+  try {
+    body = JSON.parse(await readBody(req));
+  } catch {
+    json(res, 400, { error: "请求体不是合法 JSON" });
+    return;
+  }
+
+  const id = String(body.approvalId ?? "");
+  const resolve = approvals.get(id);
+  if (!resolve) {
+    json(res, 404, { error: "审批请求已失效或已超时" });
+    return;
+  }
+
+  approvals.delete(id);
+  resolve(body.approved === true);
+  json(res, 200, { ok: true });
+}
+
+/**
+ * POST /api/chat — one full agent turn: model → tools → model …,
+ * with skills, memory and session persistence.
+ */
 async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  let payload: { modelId?: string; messages?: unknown; system?: string; temperature?: number };
+  let payload: {
+    sessionId?: string;
+    modelId?: string;
+    message?: string;
+    system?: string;
+    temperature?: number;
+  };
   try {
     payload = JSON.parse(await readBody(req));
   } catch (err) {
-    json(res, 400, { error: (err as Error).message });
+    json(res, 400, { error: `请求体不是合法 JSON：${(err as Error).message}` });
+    return;
+  }
+
+  const message = typeof payload.message === "string" ? payload.message.trim() : "";
+  if (!message) {
+    json(res, 400, { error: "message 不能为空" });
+    return;
+  }
+  if (message.length > MAX_CONTENT) {
+    json(res, 400, { error: "消息过长" });
     return;
   }
 
   const entry = findModel(getCatalog().entries, String(payload.modelId ?? ""));
   if (!entry) {
-    json(res, 404, { error: `Unknown model "${payload.modelId}"` });
+    json(res, 404, { error: `未知模型 "${payload.modelId}"` });
     return;
   }
 
-  let messages: ChatMessage[];
-  try {
-    messages = sanitizeMessages(payload.messages);
-  } catch (err) {
-    json(res, 400, { error: (err as Error).message });
-    return;
-  }
-
-  const system = typeof payload.system === "string" ? payload.system.trim() : "";
-  if (system) messages.unshift({ role: "system", content: system.slice(0, MAX_CONTENT) });
-
-  const cfg = configFor(entry, typeof payload.temperature === "number" ? payload.temperature : undefined);
+  const cfg = configFor(
+    entry,
+    typeof payload.temperature === "number" ? payload.temperature : undefined,
+  );
   if (!cfg.apiKey && entry.requiresKey !== false) {
     json(res, 400, {
-      error: `No API key for ${entry.label}. Set ${entry.apiKeyEnv ?? "the key"} in the environment or .env.`,
+      error: `模型 ${entry.label} 未配置 API key（可设 ${entry.apiKeyEnv ?? "key"}，或在网页 ⚙ → 模型 里填写）`,
     });
     return;
   }
+
+  const existing = payload.sessionId ? sessionStore.load(String(payload.sessionId)) : undefined;
+  const session = existing ?? sessionStore.create();
+  if (!existing) sessionStore.save(session);
+
+  if (busySessions.has(session.id)) {
+    json(res, 409, { error: "该会话正在生成中，请稍候或先点停止" });
+    return;
+  }
+  busySessions.add(session.id);
+
+  const customSystem =
+    typeof payload.system === "string" ? payload.system.trim().slice(0, MAX_CONTENT) : "";
 
   const controller = new AbortController();
   res.on("close", () => {
     if (!res.writableEnded) controller.abort();
   });
 
-  res.writeHead(200, { ...SSE_HEADERS, "x-model": entry.id });
-  const send = (obj: unknown): void => {
-    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  res.writeHead(200, { ...SSE_HEADERS, "x-model": entry.id, "x-session": session.id });
+  const send: Emit = (event) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
   };
+
+  send({
+    type: "start",
+    sessionId: session.id,
+    model: entry.id,
+    provider: entry.provider ?? "custom",
+  });
 
   const started = Date.now();
   let chars = 0;
-  send({ type: "start", model: entry.id, provider: entry.provider ?? "custom" });
+
+  const agent = new Agent({
+    config: cfg,
+    tools: createToolRegistry({ skills: agentSkills, allowSubagent: false }),
+    session,
+    store: sessionStore,
+    buildSystemPrompt: () => {
+      const base = buildSystemPrompt({ config: cfg, skills: agentSkills });
+      return customSystem ? `${base}\n\n## 用户附加要求\n${customSystem}` : base;
+    },
+    hooks: {
+      onAssistantText: () => {},
+      onToolStart: (name, args) => send({ type: "tool_start", name, args }),
+      onToolEnd: (name, result) =>
+        send({
+          type: "tool_end",
+          name,
+          ok: !result.isError,
+          preview: result.content.slice(0, 800),
+        }),
+      onIteration: (index) => send({ type: "iteration", index }),
+    },
+    approve: ({ action, detail }) => requestApproval(send, action, detail),
+    signal: () => controller.signal,
+  });
 
   try {
-    for await (const event of chatCompletionStream(cfg, messages, { signal: controller.signal })) {
-      if (event.type === "text") {
-        chars += event.text.length;
-        send({ type: "delta", text: event.text });
-      } else if (event.type === "done") {
-        send({ type: "done", chars, ms: Date.now() - started, finishReason: event.finishReason });
-      }
-    }
+    const answer = await agent.run(message, (delta) => {
+      chars += delta.length;
+      send({ type: "delta", text: delta });
+    });
+    send({
+      type: "done",
+      sessionId: session.id,
+      chars,
+      ms: Date.now() - started,
+      answer: answer.slice(0, 200),
+    });
   } catch (err) {
-    const message =
-      (err as Error).name === "AbortError" ? "aborted by client" : (err as Error).message;
-    send({ type: "error", message });
+    const aborted = (err as Error).name === "AbortError";
+    send({
+      type: "error",
+      message: aborted ? "已停止" : (err as Error).message,
+      aborted,
+    });
     if (err instanceof LLMError && err.status) {
       console.error(`[chat] ${entry.id}: HTTP ${err.status}`);
     }
   } finally {
+    busySessions.delete(session.id);
     if (!res.writableEnded) res.end();
   }
 }
@@ -418,6 +544,22 @@ const server = http.createServer((req, res) => {
       });
       return;
     }
+    if (/^\/api\/sessions\/[^/]+$/.test(pathname)) {
+      const id = decodeURIComponent(pathname.split("/")[3] ?? "");
+      const session = sessionStore.load(id);
+      if (!session) {
+        json(res, 404, { error: `会话 "${id}" 不存在` });
+        return;
+      }
+      json(res, 200, {
+        id: session.id,
+        title: session.title,
+        updatedAt: session.updatedAt,
+        messages: session.messages,
+      });
+      return;
+    }
+
     if (serveStatic(res, pathname)) return;
     if (pathname === "/favicon.ico") {
       res.writeHead(204);
@@ -425,6 +567,20 @@ const server = http.createServer((req, res) => {
       return;
     }
     json(res, 404, { error: "Not found" });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/sessions") {
+    const session = sessionStore.create();
+    sessionStore.save(session);
+    json(res, 200, { id: session.id });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/chat/approve") {
+    void handleApprove(req, res).catch((err) => {
+      if (!res.headersSent) json(res, 500, { error: (err as Error).message });
+    });
     return;
   }
 

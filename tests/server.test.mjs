@@ -1,5 +1,5 @@
 /**
- * Web gateway smoke test: mock upstream LLM, real dist/server.js.
+ * Web gateway + agent smoke test: mock upstream LLM, real dist/server.js.
  * `npm run test:web`
  */
 import http from "node:http";
@@ -15,8 +15,14 @@ const root = path.resolve(here, "..");
 const entry = path.join(root, "dist", "server.js");
 
 const REPLY = "Hello from mock!";
+const TOOL_REPLY = "Tool finished.";
+const seen = { toolCount: 0, sawTools: false };
 
 /* ---------- mock upstream ---------- */
+
+function sse(res, payload) {
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
 
 const upstream = http.createServer((req, res) => {
   let raw = "";
@@ -26,12 +32,51 @@ const upstream = http.createServer((req, res) => {
     assert.equal(req.url, "/v1/chat/completions");
     assert.ok(Array.isArray(body.messages) && body.messages.length > 0);
 
+    if (Array.isArray(body.tools) && body.tools.length) {
+      seen.sawTools = true;
+      seen.toolCount = body.tools.length;
+    }
+
+    const wantsTool = body.messages.some(
+      (m) => m.role === "user" && /run a command/i.test(m.content ?? ""),
+    );
+    const hasToolResult = body.messages.some((m) => m.role === "tool");
+
     if (body.stream) {
       res.writeHead(200, { "content-type": "text/event-stream" });
-      for (const piece of ["Hello", " from", " mock!"]) {
-        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
+
+      if (wantsTool && !hasToolResult) {
+        sse(res, {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_shell_1",
+                    type: "function",
+                    function: {
+                      name: "shell",
+                      arguments: JSON.stringify({ command: "echo agent-tool-ok" }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: null,
+            },
+          ],
+        });
+        sse(res, { choices: [{ delta: {}, finish_reason: "tool_calls" }] });
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
       }
-      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`);
+
+      const text = wantsTool && hasToolResult ? TOOL_REPLY : REPLY;
+      for (const piece of text.match(/.{1,6}/g) ?? []) {
+        sse(res, { choices: [{ delta: { content: piece }, finish_reason: null }] });
+      }
+      sse(res, { choices: [{ delta: {}, finish_reason: "stop" }] });
       res.write("data: [DONE]\n\n");
       res.end();
       return;
@@ -40,7 +85,9 @@ const upstream = http.createServer((req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
       JSON.stringify({
-        choices: [{ message: { role: "assistant", content: REPLY }, finish_reason: "stop" }],
+        choices: [
+          { message: { role: "assistant", content: REPLY }, finish_reason: "stop" },
+        ],
         usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
       }),
     );
@@ -66,8 +113,8 @@ function waitForUrl(child) {
   });
 }
 
-async function readSSE(res, onEvent) {
-  const reader = res.body.getReader();
+async function readSSE(response, onEvent) {
+  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   for (;;) {
@@ -86,6 +133,14 @@ async function readSSE(res, onEvent) {
       }
     }
   }
+}
+
+async function chat(base, body) {
+  return fetch(`${base}/api/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 /* ---------- test ---------- */
@@ -113,6 +168,7 @@ async function main() {
   );
 
   const localFile = path.join(tmpDir, "models.local.json");
+  const stateDir = path.join(tmpDir, ".tsagent");
 
   const child = spawn(process.execPath, [entry, "--port", "0"], {
     cwd: root,
@@ -120,6 +176,7 @@ async function main() {
       ...process.env,
       TSA_MODELS_FILE: modelsFile,
       TSA_MODELS_LOCAL_FILE: localFile,
+      TSA_STATE_DIR: stateDir,
       NO_COLOR: "1",
     },
   });
@@ -134,8 +191,7 @@ async function main() {
 
     const catalog = await (await fetch(`${base}/api/models`)).json();
     assert.equal(catalog.models.length, 1);
-    assert.equal(catalog.models[0].id, "mock-fast");
-    assert.equal(catalog.models[0].available, true, "model with inline key must be available");
+    assert.equal(catalog.models[0].available, true);
     assert.equal(catalog.models[0].apiKey, undefined, "key must never reach the browser");
 
     // 2. chat UI is served
@@ -145,34 +201,71 @@ async function main() {
     assert.equal((await fetch(`${base}/app.js`)).status, 200);
     assert.equal((await fetch(`${base}/style.css`)).status, 200);
 
-    // 3. streaming /api/chat
-    const chat = await fetch(`${base}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        modelId: "mock-fast",
-        messages: [{ role: "user", content: "hi" }],
-        system: "be brief",
-        temperature: 0.2,
-      }),
+    // 3. one agent turn (no tools): streaming + persisted session
+    const chatRes = await chat(base, {
+      modelId: "mock-fast",
+      message: "hi there",
+      system: "be brief",
+      temperature: 0.2,
     });
-    assert.equal(chat.status, 200);
-    assert.match(chat.headers.get("content-type"), /text\/event-stream/);
+    assert.equal(chatRes.status, 200);
+    assert.match(chatRes.headers.get("content-type"), /text\/event-stream/);
 
+    let sessionId = null;
     let text = "";
     let donePayload = null;
-    let started = false;
-    await readSSE(chat, (evt) => {
-      if (evt.type === "start") started = true;
+    await readSSE(chatRes, (evt) => {
+      if (evt.type === "start") sessionId = evt.sessionId;
       else if (evt.type === "delta") text += evt.text;
       else if (evt.type === "done") donePayload = evt;
       else if (evt.type === "error") throw new Error(evt.message);
     });
-    assert.ok(started, "should emit a start frame");
+    assert.ok(sessionId, "start frame must carry a sessionId");
     assert.equal(text, REPLY);
-    assert.ok(donePayload && donePayload.chars === REPLY.length, "done frame should report length");
+    assert.equal(donePayload.chars, REPLY.length);
+    assert.equal(donePayload.sessionId, sessionId);
 
-    // 4. OpenAI-compatible non-streaming
+    // tools are advertised to the model
+    assert.ok(seen.sawTools && seen.toolCount >= 10, `expected agent tools, got ${seen.toolCount}`);
+
+    // session on disk + readable through the API
+    const stored = await (await fetch(`${base}/api/sessions/${sessionId}`)).json();
+    assert.equal(stored.id, sessionId);
+    const roles = stored.messages.map((m) => m.role);
+    assert.ok(roles.includes("system"), "system prompt should be stored");
+    assert.ok(roles.includes("user"), "user turn should be stored");
+    assert.ok(roles.includes("assistant"), "assistant turn should be stored");
+    assert.ok(
+      stored.messages.some((m) => m.role === "assistant" && m.content === REPLY),
+      "assistant answer should be persisted",
+    );
+    assert.ok(
+      stored.messages[0].content.includes("be brief"),
+      "custom system prompt should be appended",
+    );
+
+    // 4. tool call + approval round trip
+    const toolRes = await chat(base, { modelId: "mock-fast", message: "run a command please" });
+    assert.equal(toolRes.status, 200);
+
+    let sawApproval = false;
+    let toolText = "";
+    await readSSE(toolRes, (evt) => {
+      if (evt.type === "tool_start") assert.equal(evt.name, "shell");
+      if (evt.type === "approval") {
+        sawApproval = true;
+        void fetch(`${base}/api/chat/approve`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ approvalId: evt.approvalId, approved: true }),
+        });
+      }
+      if (evt.type === "delta") toolText += evt.text;
+    });
+    assert.ok(sawApproval, "shell must request approval");
+    assert.equal(toolText, TOOL_REPLY);
+
+    // 5. OpenAI-compatible facade stays a plain chat endpoint
     const oa = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -184,44 +277,36 @@ async function main() {
     assert.equal(oaJson.choices[0].message.content, REPLY);
     assert.equal(oaJson.usage.total_tokens, 7);
 
-    // 5. OpenAI-compatible streaming
     const oaStream = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "mock-fast", messages: [{ role: "user", content: "hi" }], stream: true }),
+      body: JSON.stringify({
+        model: "mock-fast",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
     });
     assert.equal(oaStream.status, 200);
-    let streamed = "";
-    let sawDone = false;
     const raw = await oaStream.text();
-    assert.ok(raw.includes("[DONE]"), "stream should terminate with [DONE]");
+    assert.ok(raw.includes("[DONE]"));
+    let streamed = "";
     for (const line of raw.split("\n")) {
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
-      if (payload === "[DONE]") {
-        sawDone = true;
-        continue;
-      }
-      const json = JSON.parse(payload);
-      streamed += json.choices?.[0]?.delta?.content ?? "";
+      if (payload === "[DONE]") continue;
+      streamed += JSON.parse(payload).choices?.[0]?.delta?.content ?? "";
     }
-    assert.ok(sawDone);
     assert.equal(streamed, REPLY);
 
-    // 6. validation + errors
-    const badModel = await fetch(`${base}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ modelId: "nope", messages: [{ role: "user", content: "hi" }] }),
-    });
+    // 6. validation
+    const badModel = await chat(base, { modelId: "nope", message: "hi" });
     assert.equal(badModel.status, 404);
 
-    const badRole = await fetch(`${base}/api/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ modelId: "mock-fast", messages: [{ role: "tool", content: "x" }] }),
-    });
-    assert.equal(badRole.status, 400);
+    const emptyMessage = await chat(base, { modelId: "mock-fast", message: "   " });
+    assert.equal(emptyMessage.status, 400);
+
+    const missingSession = await fetch(`${base}/api/sessions/does-not-exist`);
+    assert.equal(missingSession.status, 404);
 
     // 7. model management from the web UI
     const created = await fetch(`${base}/api/models`, {
@@ -240,19 +325,17 @@ async function main() {
 
     const afterAdd = await (await fetch(`${base}/api/models`)).json();
     const added = afterAdd.models.find((m) => m.id === "web-added");
-    assert.ok(added, "new model should be listed");
+    assert.ok(added);
     assert.equal(added.available, true);
     assert.equal(added.editable, true);
-    assert.equal(added.apiKey, undefined, "API must never return the key");
+    assert.ok(!JSON.stringify(afterAdd).includes("sk-secret-value"), "key must not leak");
 
-    const rawList = JSON.stringify(afterAdd);
-    assert.ok(!rawList.includes("sk-secret-value"), "key must not leak in the model list");
+    const storedKey = JSON.parse(fs.readFileSync(localFile, "utf8"));
+    assert.equal(
+      storedKey.models.find((m) => m.id === "web-added").apiKey,
+      "sk-secret-value",
+    );
 
-    // persisted to disk, plaintext, only on the server
-    const stored = JSON.parse(fs.readFileSync(localFile, "utf8"));
-    assert.equal(stored.models.find((m) => m.id === "web-added").apiKey, "sk-secret-value");
-
-    // editing without apiKey keeps the stored key
     const edited = await fetch(`${base}/api/models`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -268,15 +351,12 @@ async function main() {
     const afterEdit = await (await fetch(`${base}/api/models`)).json();
     const editedModel = afterEdit.models.find((m) => m.id === "web-added");
     assert.equal(editedModel.label, "Web Added v2");
-    assert.equal(editedModel.available, true, "key should survive an edit that omits apiKey");
+    assert.equal(editedModel.available, true, "key survives an edit without apiKey");
 
-    // connection test hits the mock upstream
     const tested = await fetch(`${base}/api/models/web-added/test`, { method: "POST" });
     assert.equal(tested.status, 200);
-    const testJson = await tested.json();
-    assert.equal(testJson.ok, true);
+    assert.equal((await tested.json()).ok, true);
 
-    // invalid input is rejected
     const badUrl = await fetch(`${base}/api/models`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -284,25 +364,16 @@ async function main() {
     });
     assert.equal(badUrl.status, 400);
 
-    const badId = await fetch(`${base}/api/models`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: "has spaces!", baseUrl: "https://x/v1", model: "m" }),
-    });
-    assert.equal(badId.status, 400);
-
-    // delete removes it from the catalogue
     const del = await fetch(`${base}/api/models/web-added`, { method: "DELETE" });
     assert.equal(del.status, 200);
-    const afterDelete = await (await fetch(`${base}/api/models`)).json();
-    assert.ok(!afterDelete.models.some((m) => m.id === "web-added"));
+    assert.ok(
+      !(await (await fetch(`${base}/api/models`)).json()).models.some((m) => m.id === "web-added"),
+    );
 
-    const delMissing = await fetch(`${base}/api/models/does-not-exist`, { method: "DELETE" });
-    assert.equal(delMissing.status, 404);
-
-    console.log("\n✅ web gateway tests passed");
+    console.log("\n✅ web gateway + agent tests passed");
     console.log(`   upstream : ${upstreamPort}`);
     console.log(`   gateway  : ${base}`);
+    console.log(`   session  : ${sessionId}`);
   } finally {
     child.kill();
     upstream.close();

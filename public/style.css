@@ -328,6 +328,144 @@ button.icon:hover {
   border-radius: 1px;
 }
 
+/* ---------- agent segments ---------- */
+
+.seg {
+  margin: 0 0 10px;
+}
+
+.seg:last-child {
+  margin-bottom: 0;
+}
+
+.seg.empty {
+  color: var(--muted);
+  font-style: italic;
+  font-size: 13px;
+}
+
+.error-text {
+  color: #ffb4b9;
+  white-space: pre-wrap;
+}
+
+.seg.tool {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #0f141c;
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+
+.seg.tool.running {
+  border-color: #2f4a6e;
+}
+
+.seg.tool.ok {
+  border-color: #265c3a;
+}
+
+.seg.tool.err {
+  border-color: #5c2a30;
+}
+
+.tool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-name {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: 12.5px;
+}
+
+.tool-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.seg.tool.ok .tool-state {
+  color: #66c88a;
+}
+
+.seg.tool.err .tool-state {
+  color: var(--danger);
+}
+
+.tool-args {
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.tool-out {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+  color: #9aa6b8;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.seg.approval {
+  border: 1px solid #5c4a22;
+  background: #211a0e;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.approval-title {
+  color: #e0b054;
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
+}
+
+.approval-action {
+  font-size: 13px;
+}
+
+.approval-code {
+  margin: 8px 0 0;
+  background: #0b0f15;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.approval-result {
+  font-size: 12.5px;
+}
+
+.approval-result.ok {
+  color: #66c88a;
+}
+
+.approval-result.no {
+  color: var(--danger);
+}
+
 @keyframes blink {
   50% {
     opacity: 0;

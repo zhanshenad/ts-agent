@@ -346,6 +346,7 @@ function hideEmpty() {
 }
 
 function timeLabel(ms) {
+  if (!ms) return "";
   if (ms < 1000) return `${ms} ms`;
   return `${(ms / 1000).toFixed(1)} s`;
 }
@@ -362,57 +363,172 @@ function addUserMessage(text) {
   scrollToBottom(true);
 }
 
+function toolArgsText(args) {
+  const entries = Object.entries(args ?? {});
+  if (!entries.length) return "";
+  const priority = ["command", "path", "pattern", "query", "url", "name"];
+  const hit = entries.find(([k]) => priority.includes(k));
+  if (hit) return `${hit[0]}: ${String(hit[1])}`;
+  return entries
+    .slice(0, 3)
+    .map(([k, v]) => `${k}: ${String(v)}`)
+    .join("  ")
+    .slice(0, 160);
+}
+
 function addAssistantMessage() {
   hideEmpty();
+
   const el = document.createElement("div");
   el.className = "msg assistant";
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-
   const body = document.createElement("div");
   body.className = "body";
-  body.innerHTML = '<span class="cursor"></span>';
-
   const meta = document.createElement("div");
   meta.className = "meta";
   meta.hidden = true;
 
-  bubble.appendChild(body);
-  bubble.appendChild(meta);
+  bubble.append(body, meta);
   el.appendChild(bubble);
   els.messages.appendChild(el);
   scrollToBottom(true);
 
-  return {
+  const view = {
     el,
     body,
     meta,
-    setText(text) {
-      body.innerHTML = mdToHtml(text) + (state.streaming ? ' <span class="cursor"></span>' : "");
+    text: "",
+    seg: null,
+    cards: [],
+
+    append(chunk) {
+      if (!view.seg) {
+        view.seg = document.createElement("div");
+        view.seg.className = "seg text";
+        body.appendChild(view.seg);
+      }
+      view.text += chunk;
+      view.seg.innerHTML = mdToHtml(view.text) + ' <span class="cursor"></span>';
+      scrollToBottom();
     },
-    finish(modelLabel, ms, chars) {
-      body.innerHTML = mdToHtml(state.messages.at(-1)?.content ?? "");
-      meta.hidden = false;
-      meta.innerHTML = `<span>${escapeHtml(modelLabel)}</span><span>${timeLabel(ms)}</span><span>${chars} 字</span>`;
-      const copy = document.createElement("button");
-      copy.textContent = "复制";
-      copy.onclick = async () => {
+
+    finishText() {
+      if (!view.seg) return;
+      view.seg.innerHTML = mdToHtml(view.text);
+      view.seg = null;
+      view.text = "";
+    },
+
+    addTool(name, args) {
+      view.finishText();
+      const card = document.createElement("div");
+      card.className = "seg tool running";
+      card.innerHTML =
+        `<div class="tool-head"><span class="tool-name">${escapeHtml(name)}</span>` +
+        `<span class="tool-state">运行中…</span></div>` +
+        `<div class="tool-args">${escapeHtml(toolArgsText(args))}</div>` +
+        `<div class="tool-out" hidden></div>`;
+      body.appendChild(card);
+      view.cards.push({ name, card, done: false });
+      scrollToBottom();
+    },
+
+    completeTool(name, ok, preview) {
+      const entry = view.cards.find((c) => c.name === name && !c.done);
+      if (!entry) return;
+      entry.done = true;
+      entry.card.classList.remove("running");
+      entry.card.classList.add(ok ? "ok" : "err");
+      entry.card.querySelector(".tool-state").textContent = ok ? "完成" : "失败";
+      const out = entry.card.querySelector(".tool-out");
+      if (preview) {
+        out.hidden = false;
+        out.textContent = preview.length > 600 ? `${preview.slice(0, 600)}…` : preview;
+      }
+      scrollToBottom();
+    },
+
+    addApproval(id, action, detail) {
+      view.finishText();
+      const card = document.createElement("div");
+      card.className = "seg approval";
+      card.innerHTML =
+        `<div class="approval-title">需要你确认</div>` +
+        `<div class="approval-action">${escapeHtml(action)}</div>` +
+        (detail ? `<pre class="approval-code">${escapeHtml(detail)}</pre>` : "") +
+        `<div class="approval-actions"></div>`;
+
+      const actions = card.querySelector(".approval-actions");
+      const allow = document.createElement("button");
+      allow.type = "button";
+      allow.className = "primary";
+      allow.textContent = "允许";
+      const deny = document.createElement("button");
+      deny.type = "button";
+      deny.className = "ghost";
+      deny.textContent = "拒绝";
+
+      const decide = async (approved) => {
+        allow.disabled = true;
+        deny.disabled = true;
         try {
-          await navigator.clipboard.writeText(state.messages.at(-1)?.content ?? "");
-          copy.textContent = "已复制";
-          setTimeout(() => (copy.textContent = "复制"), 1500);
+          await fetch("/api/chat/approve", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ approvalId: id, approved }),
+          });
         } catch {
-          copy.textContent = "复制失败";
+          /* the run may already be gone */
         }
+        actions.innerHTML = `<span class="approval-result ${approved ? "ok" : "no"}">${
+          approved ? "已允许" : "已拒绝"
+        }</span>`;
       };
-      meta.appendChild(copy);
+
+      allow.addEventListener("click", () => decide(true));
+      deny.addEventListener("click", () => decide(false));
+      actions.append(allow, deny);
+      body.appendChild(card);
+      scrollToBottom();
     },
+
+    finalize(label, ms, chars) {
+      view.finishText();
+      if (chars === 0) {
+        body.insertAdjacentHTML("beforeend", '<div class="seg text empty">（没有文本输出）</div>');
+      }
+      meta.hidden = false;
+      meta.innerHTML =
+        `<span>${escapeHtml(label || "")}</span>` +
+        (timeLabel(ms) ? `<span>${timeLabel(ms)}</span>` : "") +
+        `<span>${chars} 字</span>`;
+      view.sealButton = document.createElement("button");
+      view.sealButton.textContent = "复制";
+      view.sealButton.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(view.el.innerText.trim());
+          view.sealButton.textContent = "已复制";
+          setTimeout(() => (view.sealButton.textContent = "复制"), 1500);
+        } catch {
+          view.sealButton.textContent = "复制失败";
+        }
+      });
+      meta.appendChild(view.sealButton);
+    },
+
     fail(message) {
-      body.innerHTML = mdToHtml(message);
-      el.classList.add("error");
+      view.finishText();
+      const box = document.createElement("div");
+      box.className = "seg text error-text";
+      box.textContent = message;
+      body.appendChild(box);
       meta.hidden = true;
+      scrollToBottom();
     },
   };
+
+  return view;
 }
 
 function addErrorMessage(message) {
@@ -431,7 +547,7 @@ async function readSSE(response, onEvent) {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
+  for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -444,11 +560,13 @@ async function readSSE(response, onEvent) {
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
         if (!payload) continue;
+        let parsed;
         try {
-          onEvent(JSON.parse(payload));
+          parsed = JSON.parse(payload);
         } catch {
-          /* ignore malformed frame */
+          continue;
         }
+        onEvent(parsed);
       }
     }
   }
@@ -459,7 +577,12 @@ function setStreaming(on) {
   els.send.hidden = on;
   els.stop.hidden = !on;
   els.send.disabled = on;
-  els.input.disabled = false;
+}
+
+function newSessionId(id) {
+  state.sessionId = id;
+  if (id) localStorage.setItem("tsagent.session", id);
+  else localStorage.removeItem("tsagent.session");
 }
 
 async function sendMessage(text) {
@@ -469,12 +592,8 @@ async function sendMessage(text) {
     return;
   }
 
-  const payloadMessages = [...state.messages, { role: "user", content: text }];
   addUserMessage(text);
-  state.messages.push({ role: "user", content: text });
-
   const view = addAssistantMessage();
-  state.messages.push({ role: "assistant", content: "" });
 
   const model = state.models.find((m) => m.id === state.modelId);
   const started = Date.now();
@@ -489,8 +608,9 @@ async function sendMessage(text) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        sessionId: state.sessionId,
         modelId: state.modelId,
-        messages: payloadMessages,
+        message: text,
         system: state.system,
         temperature: state.temperature,
       }),
@@ -503,33 +623,44 @@ async function sendMessage(text) {
     }
 
     await readSSE(res, (evt) => {
-      if (evt.type === "delta") {
-        chars += evt.text.length;
-        state.messages[state.messages.length - 1].content += evt.text;
-        view.setText(state.messages.at(-1).content);
-        scrollToBottom();
-      } else if (evt.type === "done") {
-        view.finish(model?.label ?? state.modelId, evt.ms ?? Date.now() - started, chars);
-        setStatus("");
-      } else if (evt.type === "error") {
-        throw new Error(evt.message);
+      switch (evt.type) {
+        case "start":
+          if (evt.sessionId) newSessionId(evt.sessionId);
+          break;
+        case "delta":
+          chars += evt.text.length;
+          view.append(evt.text);
+          setStatus("生成中…");
+          break;
+        case "tool_start":
+          view.addTool(evt.name, evt.args);
+          setStatus(`调用工具 ${evt.name}…`);
+          break;
+        case "tool_end":
+          view.completeTool(evt.name, evt.ok, evt.preview ?? "");
+          break;
+        case "approval":
+          view.addApproval(evt.approvalId, evt.action, evt.detail);
+          setStatus("等待你确认…");
+          break;
+        case "approval_timeout":
+          setStatus("审批超时，已自动拒绝", true);
+          break;
+        case "done":
+          view.finalize(model?.label ?? state.modelId, evt.ms ?? Date.now() - started, chars);
+          setStatus("");
+          break;
+        case "error":
+          throw new Error(evt.message || "生成失败");
+        default:
+          break;
       }
     });
-
-    if (state.messages.at(-1).content === "") {
-      view.fail("（模型返回了空内容）");
-    }
   } catch (err) {
-    const aborted = err.name === "AbortError";
-    if (aborted) {
-      if (state.messages.at(-1).content) {
-        view.finish(`${model?.label ?? state.modelId}（已停止）`, Date.now() - started, chars);
-      } else {
-        view.fail("已停止");
-      }
+    if (err.name === "AbortError") {
+      view.finishText();
       setStatus("已停止");
     } else {
-      state.messages.pop(); // drop the empty assistant turn
       view.fail(err.message);
       setStatus(err.message, true);
     }
@@ -537,6 +668,42 @@ async function sendMessage(text) {
     setStreaming(false);
     state.controller = null;
     els.input.focus();
+  }
+}
+
+/* ---------------- sessions ---------------- */
+
+function renderHistory(messages) {
+  els.messages.querySelectorAll(".msg").forEach((node) => node.remove());
+  let shown = 0;
+
+  for (const m of messages) {
+    if (m.role === "user" && m.content) {
+      addUserMessage(m.content);
+      shown++;
+    } else if (m.role === "assistant" && m.content) {
+      const view = addAssistantMessage();
+      view.append(m.content);
+      view.finishText();
+      shown++;
+    }
+  }
+
+  if (els.empty) els.empty.hidden = shown > 0;
+  if (!shown && els.empty) els.messages.appendChild(els.empty);
+  scrollToBottom(true);
+}
+
+async function loadSession(id) {
+  if (!id) return false;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+    if (!res.ok) return false;
+    const data = await res.json();
+    renderHistory(data.messages ?? []);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -568,9 +735,15 @@ function submit() {
 
 els.stop.addEventListener("click", () => state.controller?.abort());
 
-els.clear.addEventListener("click", () => {
+els.clear.addEventListener("click", async () => {
   if (state.streaming) state.controller?.abort();
-  state.messages = [];
+  try {
+    const res = await fetch("/api/sessions", { method: "POST" });
+    const data = await res.json();
+    newSessionId(data.id);
+  } catch {
+    newSessionId(null);
+  }
   els.messages.innerHTML = "";
   if (els.empty) {
     els.empty.hidden = false;
@@ -636,18 +809,28 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------------- boot ---------------- */
 
-(function boot() {
+(async function boot() {
   const savedSystem = localStorage.getItem("tsagent.system");
   if (savedSystem) {
     state.system = savedSystem;
     els.system.value = savedSystem;
   }
+
   const savedTemp = Number(localStorage.getItem("tsagent.temperature"));
   if (Number.isFinite(savedTemp) && savedTemp > 0) {
     state.temperature = savedTemp;
     els.temperature.value = String(savedTemp);
     els.tempValue.textContent = savedTemp.toFixed(1);
   }
-  loadModels();
+
+  await loadModels();
+
+  const savedSession = localStorage.getItem("tsagent.session");
+  if (savedSession) {
+    state.sessionId = savedSession;
+    const restored = await loadSession(savedSession);
+    if (restored) setStatus("已恢复上次会话");
+  }
+
   els.input.focus();
 })();

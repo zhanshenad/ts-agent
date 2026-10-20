@@ -29,7 +29,7 @@ Allow? [y/N] y
 | 子智能体 | `src/tools/index.ts` | `spawn_subagent` 开全新上下文跑独立任务，只回传最终结论（禁止嵌套递归） |
 | 模型接入 | `src/llm.ts` | 任何 OpenAI 兼容的 `/chat/completions`：OpenAI、DeepSeek、通义/DashScope、Ollama、vLLM… |
 | 中断 | `src/index.ts` | Ctrl+C 取消当前请求，会话已落盘 |
-| Web 界面 | `src/server.ts` + `public/` | 浏览器里选模型聊天，SSE 流式输出；同时提供 OpenAI 兼容的 `/v1/chat/completions` |
+| Web 界面 | `src/server.ts` + `public/` | 完整的 agent 循环（工具 / 技能 / 记忆 / 会话）+ 工具卡片 + 审批弹窗；同时提供 OpenAI 兼容的 `/v1/chat/completions` |
 
 ## 快速开始
 
@@ -89,6 +89,10 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 页面能力：
 
 - **选模型**：下拉框按 provider 分组，未配置 key 的模型会标注出来但仍可选（选中后请求会明确报错）
+- **完整 agent 能力**：不是单轮聊天——模型可以连续调用工具（读写文件、grep、抓网页、查记忆、加载技能），每一步都实时显示
+- **工具卡片**：显示工具名、参数、状态（运行中 / 完成 / 失败）和输出摘要
+- **审批弹窗**：`shell` 这类危险工具会停下来问你，点「允许」才执行；120 秒不回答自动拒绝
+- **会话持久化**：每轮写入 `.tsagent/sessions/`，刷新页面自动恢复上次对话
 - **模型管理**：右上角 ⚙ → 「模型」标签页里可以增删改模型、填 API key、点「测试」发一个极小的请求验证连通性
 - **流式输出**：逐字返回，带停止按钮；支持 Markdown 代码块、列表、行内代码
 - **参数面板**：System prompt、temperature，存 localStorage
@@ -129,9 +133,31 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 | POST | `/api/models` | 新增/修改模型，body 里的 `apiKey` 只写不读 |
 | DELETE | `/api/models/:id` | 删除；内置模型会被隐藏 |
 | POST | `/api/models/:id/test` | 发一个最小请求验证 key / baseUrl |
-| POST | `/api/chat` | 页面专用，SSE 帧：`start` / `delta` / `done` / `error` |
-| POST | `/v1/chat/completions` | OpenAI 兼容，可作为任意客户端的 base_url |
+| POST | `/api/sessions` | 新建会话，返回 id |
+| GET | `/api/sessions/:id` | 取会话历史（含 tool 消息） |
+| POST | `/api/chat` | 完整 agent 一轮，SSE 流式，见下表 |
+| POST | `/api/chat/approve` | 回答审批：`{approvalId, approved}` |
+| POST | `/v1/chat/completions` | OpenAI 兼容（**纯 chat**，不走工具循环） |
 | GET | `/api/health` | 健康检查 |
+
+`/api/chat` 的请求与 SSE 事件：
+
+```json
+// 请求
+{ "sessionId": "可选", "modelId": "qwen-plus", "message": "帮我看看 src 里的代码", "system": "", "temperature": 0.7 }
+```
+
+| 事件 | 含义 |
+| --- | --- |
+| `start` | `{sessionId, model}`，新会话时前端要记住 `sessionId` |
+| `iteration` | 第几轮工具循环 |
+| `delta` | `{text}` 模型输出的增量文本 |
+| `tool_start` | `{name, args}` 开始调用工具 |
+| `tool_end` | `{name, ok, preview}` 工具返回 |
+| `approval` | `{approvalId, action, detail}` 需要用户确认 |
+| `approval_timeout` | 超时自动拒绝 |
+| `done` | `{chars, ms, sessionId}` |
+| `error` | `{message, aborted}` |
 
 OpenAI 兼容端点可以这么用（把任意 OpenAI SDK 的 baseURL 指过来即可）：
 
@@ -259,7 +285,9 @@ Web 网关另有一套（`node tests/server.test.mjs`，也可 `npm run test:web
 ## 已知限制
 
 - 依赖模型的 tool calling 能力，纯文本模型无法使用。
-- Web 端目前是单轮 chat（不走工具循环、不写会话），agent 能力仍只在 CLI 里；要接上，把 `server.ts` 的
-  `chatCompletionStream` 换成 `Agent.run` 即可，代价是失去逐字流式。
+- Web 端的工具集里禁用了 `spawn_subagent`：子代理内部的工具审批无法在页面上呈现，接进来等于隐式授权。
+- `/v1/chat/completions` 保持纯 chat（不走工具循环），否则会破坏 OpenAI 客户端的语义预期。
+- 同一个会话同时只能跑一轮，并发请求返回 409。
+- 会话不会自动压缩，聊得很长会顶到模型上下文上限。
 - 子智能体的记忆写入是共享的（同一个 `.tsagent/MEMORY.md`），并发跑多个子代理会互相追加。
 - 没有内置 MCP 客户端，但 `Tool` 接口很容易包一层。

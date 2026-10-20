@@ -95,7 +95,7 @@ async function* parseSSE(
 export async function* chatCompletionStream(
   cfg: Config,
   messages: ChatMessage[],
-  opts: { signal?: AbortSignal; toolChoice?: "auto" | "none" } = {},
+  opts: { signal?: AbortSignal; toolChoice?: "auto" | "none"; tools?: ToolSpec[] } = {},
 ): AsyncGenerator<StreamEvent> {
   if (!cfg.apiKey) {
     throw new LLMError(
@@ -110,6 +110,10 @@ export async function* chatCompletionStream(
     stream: true,
   };
   if (cfg.maxTokens) body.max_tokens = cfg.maxTokens;
+  if (opts.tools?.length) {
+    body.tools = wireTools(opts.tools);
+    body.tool_choice = opts.toolChoice ?? "auto";
+  }
 
   const res = await fetch(endpoint(cfg.baseUrl), {
     method: "POST",
