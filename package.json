@@ -14,9 +14,10 @@
     "serve": "node dist/server.js",
     "dev:web": "npm run build && node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node tests/smoke.test.mjs && node tests/server.test.mjs",
+    "test": "npm run build && node tests/smoke.test.mjs && node tests/server.test.mjs && node tests/retry.test.mjs",
     "test:cli": "node tests/smoke.test.mjs",
-    "test:web": "npm run build && node tests/server.test.mjs"
+    "test:web": "npm run build && node tests/server.test.mjs",
+    "test:retry": "npm run build && node tests/retry.test.mjs"
   },
   "engines": {
     "node": ">=20"

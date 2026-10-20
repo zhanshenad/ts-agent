@@ -344,6 +344,41 @@ button.icon:hover {
   font-size: 13px;
 }
 
+.seg.typing {
+  display: flex;
+  gap: 5px;
+  padding: 4px 2px;
+}
+
+.seg.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: typing 1.2s infinite ease-in-out;
+}
+
+.seg.typing span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.seg.typing span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
 .error-text {
   color: #ffb4b9;
   white-space: pre-wrap;

@@ -41,6 +41,31 @@ function wireTools(tools: ToolSpec[]): unknown[] {
 
 const RETRYABLE = new Set([408, 409, 429, 500, 502, 503, 504]);
 
+/** Network-level failures worth another attempt (undici often reports "fetch failed"). */
+function isRetryableNetwork(err: unknown): boolean {
+  const e = err as { message?: string; cause?: { code?: string } };
+  const code = e?.cause?.code ?? "";
+  if (/^(ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ENOTFOUND|EPIPE|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT)$/.test(code)) {
+    return true;
+  }
+  return /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|other side closed|network/i.test(
+    e?.message ?? "",
+  );
+}
+
+/** Turn a raw fetch failure into something a human can act on. */
+export function describeLlmError(err: unknown): string {
+  const e = err as { name?: string; message?: string; cause?: { code?: string } };
+  const code = e?.cause?.code;
+  const message = e?.message ?? String(err);
+  if (message === "fetch failed" || message === "terminated") {
+    return code
+      ? `无法连接到模型服务（${code}），检查网络、代理或 baseUrl`
+      : "无法连接到模型服务（连接被重置或中断），检查网络或代理设置";
+  }
+  return code && !message.includes(code) ? `${message} (${code})` : message;
+}
+
 /** A chunk emitted by the streaming client. */
 export type StreamEvent =
   | { type: "text"; text: string }
@@ -91,6 +116,35 @@ async function* parseSSE(
   }
 }
 
+/** POST with retries for connection-level failures and retryable HTTP codes. */
+async function postStream(
+  url: string,
+  init: RequestInit,
+  signal?: AbortSignal,
+): Promise<Response> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (RETRYABLE.has(res.status) && attempt < 2) {
+        const text = await res.text().catch(() => "");
+        lastError = new LLMError(`HTTP ${res.status}: ${text.slice(0, 200)}`, res.status);
+        await sleep(700 * 2 ** attempt);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      lastError = err;
+      const aborted = (err as Error).name === "AbortError" || signal?.aborted;
+      if (aborted || !isRetryableNetwork(err) || attempt >= 2) throw err;
+      await sleep(700 * 2 ** attempt);
+    }
+  }
+
+  throw lastError;
+}
+
 /** Streaming variant of chatCompletion, for SSE endpoints. */
 export async function* chatCompletionStream(
   cfg: Config,
@@ -115,16 +169,26 @@ export async function* chatCompletionStream(
     body.tool_choice = opts.toolChoice ?? "auto";
   }
 
-  const res = await fetch(endpoint(cfg.baseUrl), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      authorization: `Bearer ${cfg.apiKey}`,
-    },
-    body: JSON.stringify(body),
-    signal: opts.signal,
-  });
+  let res: Response;
+  try {
+    res = await postStream(
+      endpoint(cfg.baseUrl),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          authorization: `Bearer ${cfg.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      },
+      opts.signal,
+    );
+  } catch (err) {
+    if ((err as Error).name === "AbortError") throw err;
+    throw new LLMError(describeLlmError(err));
+  }
 
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
@@ -264,5 +328,6 @@ export async function chatCompletion(
     }
   }
 
-  throw lastError instanceof Error ? lastError : new LLMError(String(lastError));
+  if (lastError instanceof LLMError) throw lastError;
+  throw new LLMError(describeLlmError(lastError));
 }

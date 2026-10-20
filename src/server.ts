@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { Agent } from "./agent.js";
 import type { Config } from "./config.js";
-import { chatCompletion, chatCompletionStream, LLMError } from "./llm.js";
+import { chatCompletion, chatCompletionStream, describeLlmError, LLMError } from "./llm.js";
 import {
   deleteLocalModel,
   findModel,
@@ -150,6 +150,8 @@ const SSE_HEADERS = {
 
 const sessionStore = new SessionStore(path.join(STATE_DIR, "sessions"));
 const agentSkills = scanSkills(path.join(STATE_DIR, "skills"));
+/** Tools are stateless — build the registry once, share it across requests. */
+const webTools = createToolRegistry({ skills: agentSkills, allowSubagent: false });
 const approvals = new Map<string, (approved: boolean) => void>();
 const busySessions = new Set<string>();
 const APPROVAL_TIMEOUT_MS = 120_000;
@@ -281,7 +283,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
 
   const agent = new Agent({
     config: cfg,
-    tools: createToolRegistry({ skills: agentSkills, allowSubagent: false }),
+    tools: webTools,
     session,
     store: sessionStore,
     buildSystemPrompt: () => {
@@ -320,7 +322,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     const aborted = (err as Error).name === "AbortError";
     send({
       type: "error",
-      message: aborted ? "已停止" : (err as Error).message,
+      message: aborted ? "已停止" : describeLlmError(err),
       aborted,
     });
     if (err instanceof LLMError && err.status) {

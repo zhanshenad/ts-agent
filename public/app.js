@@ -394,6 +394,12 @@ function addAssistantMessage() {
   els.messages.appendChild(el);
   scrollToBottom(true);
 
+  // Shown until the first token arrives, so the turn never looks dead.
+  const typing = document.createElement("div");
+  typing.className = "seg typing";
+  typing.innerHTML = "<span></span><span></span><span></span>";
+  body.appendChild(typing);
+
   const view = {
     el,
     body,
@@ -401,23 +407,43 @@ function addAssistantMessage() {
     text: "",
     seg: null,
     cards: [],
+    frame: 0,
+    dirty: false,
 
     append(chunk) {
+      if (typing.parentNode) typing.remove();
+
       if (!view.seg) {
         view.seg = document.createElement("div");
         view.seg.className = "seg text";
         body.appendChild(view.seg);
       }
       view.text += chunk;
-      view.seg.innerHTML = mdToHtml(view.text) + ' <span class="cursor"></span>';
-      scrollToBottom();
+      view.dirty = true;
+
+      // Coalesce chunks into one render per frame instead of one per token.
+      if (!view.frame) {
+        view.frame = requestAnimationFrame(() => {
+          view.frame = 0;
+          if (!view.seg || !view.dirty) return;
+          view.dirty = false;
+          view.seg.innerHTML = mdToHtml(view.text) + ' <span class="cursor"></span>';
+          scrollToBottom();
+        });
+      }
     },
 
     finishText() {
+      if (view.frame) {
+        cancelAnimationFrame(view.frame);
+        view.frame = 0;
+      }
+      if (typing.parentNode) typing.remove();
       if (!view.seg) return;
       view.seg.innerHTML = mdToHtml(view.text);
       view.seg = null;
       view.text = "";
+      view.dirty = false;
     },
 
     addTool(name, args) {
