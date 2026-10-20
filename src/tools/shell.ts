@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { needsApproval } from "../permissions.js";
 import type { Tool } from "../types.js";
 import { numArg, relativeTo, resolveInWorkspace, str } from "./common.js";
 
@@ -25,13 +26,24 @@ export const shellTool: Tool = {
     const cwd = resolveInWorkspace(ctx.workspace, str(args, "cwd", false) || ".");
     const timeout = Math.min(600, Math.max(1, numArg(args, "timeout") ?? 120)) * 1000;
 
-    const approved = await ctx.approve("run shell command", command);
-    if (!approved) {
+    const mode = ctx.mode ?? "strict";
+    if (mode === "off") {
       return {
         content:
-          "Command was NOT executed: the user denied approval. Explain what you wanted to run and ask them to run it, or try a non-shell approach.",
+          "Shell is disabled (permission mode `off`). Use the file tools instead, or ask the user to enable a shell mode.",
         isError: true,
       };
+    }
+
+    if (needsApproval(mode, command)) {
+      const approved = await ctx.approve("run shell command", command);
+      if (!approved) {
+        return {
+          content:
+            "Command was NOT executed: the user denied approval. Explain what you wanted to run and ask them to run it, or try a non-shell approach.",
+          isError: true,
+        };
+      }
     }
 
     return await new Promise((resolve) => {

@@ -245,7 +245,11 @@ async function main() {
     );
 
     // 4. tool call + approval round trip
-    const toolRes = await chat(base, { modelId: "mock-fast", message: "run a command please" });
+    const toolRes = await chat(base, {
+      modelId: "mock-fast",
+      message: "run a command please",
+      mode: "strict",
+    });
     assert.equal(toolRes.status, 200);
 
     let sawApproval = false;

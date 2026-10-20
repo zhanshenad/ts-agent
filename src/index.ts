@@ -6,6 +6,7 @@ import { stdin, stdout } from "node:process";
 import { Agent } from "./agent.js";
 import { loadConfig, describeRuntime, type CliOverrides } from "./config.js";
 import { loadMemoryContext } from "./memory.js";
+import { parseMode, type PermissionMode } from "./permissions.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { SessionStore, type Session } from "./session.js";
 import { scanSkills } from "./skills.js";
@@ -20,6 +21,7 @@ interface CliArgs {
   listSessions: boolean;
   showHelp: boolean;
   verbose: boolean;
+  mode?: string;
   overrides: CliOverrides;
 }
 
@@ -68,6 +70,9 @@ function parseArgs(argv: string[]): CliArgs {
       case "--yes":
         overrides.autoApprove = true;
         break;
+      case "--mode":
+        args.mode = next();
+        break;
       case "--max-iterations":
         overrides.maxIterations = Number(next());
         break;
@@ -108,7 +113,8 @@ Options
   -m, --model <name>       Override the model
       --base-url <url>     Override the API base URL
   -w, --workspace <dir>    Root the agent may touch (default: cwd)
-  -y, --yes                Auto-approve destructive tools (shell)
+  -y, --yes                Auto-approve destructive tools (same as --mode auto)
+      --mode <m>           Shell policy: off | strict | smart | auto (default: strict)
       --max-iterations <n> Tool-call loop limit (default 16)
   -v, --verbose            Print tool results in full
   -h, --help               Show this help
@@ -191,6 +197,11 @@ async function main(): Promise<void> {
 
   const systemPrompt = () => buildSystemPrompt({ config, skills });
 
+  // --yes wins over --mode; the CLI defaults to strict.
+  const permissionMode: PermissionMode = args.overrides.autoApprove
+    ? "auto"
+    : parseMode(args.mode, "strict");
+
   const runSubagent = async (task: string): Promise<string> => {
     const subSession = store.create("subagent");
     const subTools = createToolRegistry({ skills, allowSubagent: false });
@@ -205,6 +216,7 @@ async function main(): Promise<void> {
         `Do not ask questions you can answer yourself.`,
       approve: async ({ action, detail }) => approve(action, detail),
       maxIterations: Math.min(8, config.maxIterations),
+      mode: permissionMode,
       hooks: {
         onAssistantText: () => {},
         onToolStart: (name, a) => console.log(c.gray(`  ↳ sub: ${name} ${oneLine(a, 100)}`)),
@@ -252,6 +264,7 @@ async function main(): Promise<void> {
     hooks,
     approve: async ({ action, detail }) => approve(action, detail),
     subagentRunner: runSubagent,
+    mode: permissionMode,
     signal: () => controller?.signal,
   });
 

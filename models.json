@@ -18,6 +18,15 @@
       "apiKeyEnv": "DASHSCOPE_API_KEY"
     },
     {
+      "id": "qwen-vl-max",
+      "label": "Qwen VL Max（可看图）",
+      "provider": "DashScope",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-vl-max",
+      "apiKeyEnv": "DASHSCOPE_API_KEY",
+      "vision": true
+    },
+    {
       "id": "deepseek-chat",
       "label": "DeepSeek Chat",
       "provider": "DeepSeek",

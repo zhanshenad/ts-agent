@@ -11,7 +11,27 @@ const state = {
   controller: null,
   system: "",
   temperature: 0.7,
+  mode: "smart",
+  attachments: [],
 };
+
+const MODE_LABELS = { off: "关闭", strict: "严格", smart: "智能", auto: "自动" };
+const MODE_RANK = { off: 0, strict: 1, smart: 2, auto: 3 };
+let maxMode = "smart";
+
+function applyMaxMode(max) {
+  maxMode = max;
+  for (const opt of els.mode.options) {
+    const over = (MODE_RANK[opt.value] ?? 9) > (MODE_RANK[max] ?? 0);
+    opt.disabled = over;
+    opt.title = over ? `服务器上限是「${MODE_LABELS[max] ?? max}」` : "";
+  }
+  if ((MODE_RANK[state.mode] ?? 9) > (MODE_RANK[max] ?? 0)) {
+    state.mode = max;
+    els.mode.value = max;
+  }
+  els.mode.classList.toggle("warn", state.mode !== "smart");
+}
 
 const els = {
   model: $("#model"),
@@ -35,6 +55,10 @@ const els = {
   formNote: $("#form-note"),
   cancelForm: $("#btn-cancel-form"),
   storePath: $("#store-path"),
+  mode: $("#mode"),
+  attachments: $("#attachments"),
+  attach: $("#btn-attach"),
+  fileInput: $("#file-input"),
   f: {
     label: $("#f-label"),
     provider: $("#f-provider"),
@@ -249,6 +273,19 @@ async function saveForm(event) {
     state.modelId = payload.id;
     localStorage.setItem("tsagent.model", payload.id);
     await loadModels();
+
+  const savedMode = localStorage.getItem("tsagent.mode");
+  if (savedMode && MODE_LABELS[savedMode]) {
+    state.mode = savedMode;
+    els.mode.value = savedMode;
+  }
+  try {
+    const h = await (await fetch("/api/health")).json();
+    if (h.maxMode) applyMaxMode(h.maxMode);
+  } catch {
+    /* older server: keep the default */
+  }
+  els.mode.classList.toggle("warn", state.mode !== "smart");
     els.formNote.className = "form-note ok";
     els.formNote.textContent = "已保存";
     setStatus(`模型 ${payload.label} 已保存`);
@@ -267,6 +304,19 @@ async function removeModel(m) {
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     if (state.modelId === m.id) state.modelId = null;
     await loadModels();
+
+  const savedMode = localStorage.getItem("tsagent.mode");
+  if (savedMode && MODE_LABELS[savedMode]) {
+    state.mode = savedMode;
+    els.mode.value = savedMode;
+  }
+  try {
+    const h = await (await fetch("/api/health")).json();
+    if (h.maxMode) applyMaxMode(h.maxMode);
+  } catch {
+    /* older server: keep the default */
+  }
+  els.mode.classList.toggle("warn", state.mode !== "smart");
     setStatus(`已删除 ${m.label}`);
   } catch (err) {
     setStatus(`删除失败：${err.message}`, true);
@@ -574,7 +624,15 @@ async function sendMessage(text) {
     return;
   }
 
-  addUserMessage(text);
+  const pending = state.attachments.slice();
+  const userLabel = pending.length
+    ? `${text}\n[附件] ${pending.map((a) => a.name).join("、")}`
+    : text;
+
+  addUserMessage(userLabel);
+  state.attachments = [];
+  renderAttachments();
+
   const view = addAssistantMessage();
 
   const model = state.models.find((m) => m.id === state.modelId);
@@ -595,6 +653,8 @@ async function sendMessage(text) {
         message: text,
         system: state.system,
         temperature: state.temperature,
+        mode: state.mode,
+        attachments: pending.map((a) => ({ id: a.id })),
       }),
       signal: state.controller.signal,
     });
@@ -608,6 +668,12 @@ async function sendMessage(text) {
       switch (evt.type) {
         case "start":
           if (evt.sessionId) newSessionId(evt.sessionId);
+          if (evt.maxMode) applyMaxMode(evt.maxMode);
+          if (evt.mode && evt.mode !== state.mode) {
+            state.mode = evt.mode;
+            els.mode.value = evt.mode;
+            setStatus(`权限被服务器限制为「${MODE_LABELS[evt.mode] ?? evt.mode}」`, true);
+          }
           break;
         case "delta":
           chars += evt.text.length;
@@ -653,19 +719,107 @@ async function sendMessage(text) {
   }
 }
 
+/* ---------------- attachments ---------------- */
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderAttachments() {
+  if (!state.attachments.length) {
+    els.attachments.hidden = true;
+    els.attachments.innerHTML = "";
+    return;
+  }
+
+  els.attachments.hidden = false;
+  els.attachments.innerHTML = "";
+
+  for (const att of state.attachments) {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+
+    if (att.kind === "image") {
+      const img = document.createElement("img");
+      img.src = att.url;
+      img.alt = att.name;
+      chip.appendChild(img);
+    }
+
+    const label = document.createElement("span");
+    label.textContent = att.name;
+    label.title = att.name;
+
+    const size = document.createElement("em");
+    size.textContent = formatSize(att.size);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = "移除";
+    remove.addEventListener("click", () => {
+      state.attachments = state.attachments.filter((a) => a.id !== att.id);
+      renderAttachments();
+    });
+
+    chip.append(label, size, remove);
+    els.attachments.appendChild(chip);
+  }
+}
+
+async function uploadFiles(fileList) {
+  const room = 10 - state.attachments.length;
+  if (room <= 0) {
+    setStatus("附件数量已达上限（10 个）", true);
+    return;
+  }
+
+  const files = [...fileList].slice(0, room);
+  if (!files.length) return;
+
+  setStatus("上传中…");
+  const form = new FormData();
+  for (const file of files) form.append("file", file);
+
+  try {
+    const res = await fetch("/api/upload", { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    state.attachments.push(...(data.files ?? []));
+    renderAttachments();
+    setStatus(`已添加 ${data.files?.length ?? 0} 个文件`);
+  } catch (err) {
+    setStatus(`上传失败：${err.message}`, true);
+  }
+}
+
 /* ---------------- sessions ---------------- */
+
+function textOf(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const texts = content.filter((p) => p && p.type === "text").map((p) => p.text);
+    const images = content.filter((p) => p && p.type === "image_url").length;
+    return `${texts.join("\n")}${images ? `\n[图片 ×${images}]` : ""}`.trim();
+  }
+  return "";
+}
 
 function renderHistory(messages) {
   els.messages.querySelectorAll(".msg").forEach((node) => node.remove());
   let shown = 0;
 
   for (const m of messages) {
-    if (m.role === "user" && m.content) {
-      addUserMessage(m.content);
+    const text = textOf(m.content);
+    if (!text) continue;
+    if (m.role === "user") {
+      addUserMessage(text);
       shown++;
-    } else if (m.role === "assistant" && m.content) {
+    } else if (m.role === "assistant") {
       const view = addAssistantMessage();
-      view.append(m.content);
+      view.append(text);
       view.finishText();
       shown++;
     }
@@ -709,10 +863,11 @@ els.send.addEventListener("click", submit);
 
 function submit() {
   const text = els.input.value.trim();
-  if (!text || state.streaming) return;
+  if (state.streaming) return;
+  if (!text && !state.attachments.length) return;
   els.input.value = "";
   autoGrow();
-  sendMessage(text);
+  sendMessage(text || "请查看附件");
 }
 
 els.stop.addEventListener("click", () => state.controller?.abort());
@@ -739,6 +894,44 @@ els.model.addEventListener("change", () => {
   localStorage.setItem("tsagent.model", state.modelId);
   updateModelDetail();
   renderModelList();
+});
+
+els.mode.addEventListener("change", () => {
+  state.mode = els.mode.value;
+  localStorage.setItem("tsagent.mode", state.mode);
+  els.mode.classList.toggle("warn", state.mode !== "smart");
+  setStatus(`命令权限：${MODE_LABELS[state.mode] ?? state.mode}`);
+});
+
+els.attach.addEventListener("click", () => els.fileInput.click());
+
+els.fileInput.addEventListener("change", () => {
+  if (els.fileInput.files?.length) void uploadFiles(els.fileInput.files);
+  els.fileInput.value = "";
+});
+
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  if (!e.dataTransfer?.types?.includes("Files")) return;
+  e.preventDefault();
+  dragDepth += 1;
+  document.body.classList.add("dragging");
+});
+window.addEventListener("dragover", (e) => {
+  if (!e.dataTransfer?.types?.includes("Files")) return;
+  e.preventDefault();
+});
+window.addEventListener("dragleave", (e) => {
+  e.preventDefault();
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) document.body.classList.remove("dragging");
+});
+window.addEventListener("drop", (e) => {
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove("dragging");
+  void uploadFiles(e.dataTransfer.files);
 });
 
 els.modelForm.addEventListener("submit", saveForm);
@@ -806,6 +999,19 @@ document.addEventListener("keydown", (e) => {
   }
 
   await loadModels();
+
+  const savedMode = localStorage.getItem("tsagent.mode");
+  if (savedMode && MODE_LABELS[savedMode]) {
+    state.mode = savedMode;
+    els.mode.value = savedMode;
+  }
+  try {
+    const h = await (await fetch("/api/health")).json();
+    if (h.maxMode) applyMaxMode(h.maxMode);
+  } catch {
+    /* older server: keep the default */
+  }
+  els.mode.classList.toggle("warn", state.mode !== "smart");
 
   const savedSession = localStorage.getItem("tsagent.session");
   if (savedSession) {

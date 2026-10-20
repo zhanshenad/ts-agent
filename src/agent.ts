@@ -1,9 +1,11 @@
 import type { Config } from "./config.js";
 import { chatCompletion, chatCompletionStream } from "./llm.js";
+import type { PermissionMode } from "./permissions.js";
 import type { Session, SessionStore } from "./session.js";
 import type {
   AgentHooks,
   ChatMessage,
+  ContentPart,
   ToolCall,
   ToolContext,
   ToolRegistry,
@@ -26,6 +28,8 @@ export interface AgentOptions {
   /** Human approval callback for destructive tools. Defaults to deny. */
   approve?: (req: ApprovalRequest) => Promise<boolean>;
   maxIterations?: number;
+  /** How much autonomy the shell tool gets. Defaults to strict. */
+  mode?: PermissionMode;
   /** Static signal, or a getter so the caller can swap it per turn. */
   signal?: AbortSignal | (() => AbortSignal | undefined);
   /** Runner for spawn_subagent; omitted inside subagents to prevent recursion. */
@@ -82,6 +86,7 @@ export class Agent {
       workspace: this.opts.config.workspace,
       homeDir: this.opts.config.homeDir,
       sessionId: this.current.id,
+      mode: this.opts.mode ?? "strict",
       approve: async (action, detail) => {
         if (this.opts.config.autoApprove) return true;
         if (!this.opts.approve) return false;
@@ -96,7 +101,7 @@ export class Agent {
    * Pass `onDelta` to stream assistant text as it arrives; the tool loop is
    * identical either way, so a streaming caller keeps full agent behaviour.
    */
-  async run(input: string, onDelta?: (text: string) => void): Promise<string> {
+  async run(input: string | ContentPart[], onDelta?: (text: string) => void): Promise<string> {
     this.refreshSystem();
     this.messages.push({ role: "user", content: input });
     this.opts.store.save(this.current);

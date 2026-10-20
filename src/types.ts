@@ -12,9 +12,16 @@ export interface ToolCall {
   };
 }
 
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+/** A message body: plain text, or an OpenAI-style multipart body for images. */
+export type MessageContent = string | ContentPart[] | null;
+
 export interface ChatMessage {
   role: Role;
-  content: string | null;
+  content: MessageContent;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -47,6 +54,8 @@ export interface ToolContext {
   /** Directory holding sessions / memory / skills (.tsagent). */
   homeDir: string;
   sessionId: string;
+  /** How much autonomy the shell tool has. */
+  mode: import("./permissions.js").PermissionMode;
   /** Ask the human for permission. Returns false in non-interactive mode. */
   approve(action: string, detail?: string): Promise<boolean>;
   /** Progress line for the UI. */

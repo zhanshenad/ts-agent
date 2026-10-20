@@ -173,7 +173,8 @@ async function main() {
     assert.equal(await page.locator(".msg.user").count(), 1);
     assert.match(await page.locator(".msg.assistant .meta").first().innerText(), /Mock Model/);
 
-    /* 3. tool call → approval card → allow → tool output */
+    /* 3. strict mode: tool call → approval card → allow → tool output */
+    await page.locator("#mode").selectOption("strict");
     await page.locator("#input").fill("run-a-shell now");
     await page.locator("#btn-send").click();
 
@@ -204,7 +205,25 @@ async function main() {
       "both user turns should be restored",
     );
 
-    /* 5. model manager reflects the catalogue */
+    /* 5. upload a file and attach it to the next turn */
+    const uploadPath = path.join(tmp, "note.txt");
+    fs.writeFileSync(uploadPath, "UPLOAD_MARKER");
+    await page.locator("#file-input").setInputFiles(uploadPath);
+    await page.waitForSelector(".attach-chip", { timeout: 10000 });
+    assert.match(await page.locator(".attach-chip").innerText(), /note\.txt/);
+
+    await page.locator("#input").fill("check the file");
+    await page.locator("#btn-send").click();
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll(".msg.user")].some((n) =>
+          n.innerText.includes("[附件]"),
+        ),
+      null,
+      { timeout: 15000 },
+    );
+
+    /* 6. model manager reflects the catalogue */
     await page.getByRole("button", { name: "设置" }).click();
     await page.waitForSelector("#model-list .model-item");
     assert.match(await page.locator("#model-list").innerText(), /Mock Model/);

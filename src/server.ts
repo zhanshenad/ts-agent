@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Agent } from "./agent.js";
 import type { Config } from "./config.js";
 import { chatCompletion, chatCompletionStream, describeLlmError, LLMError } from "./llm.js";
+import { clampMode, parseMode, type PermissionMode } from "./permissions.js";
 import {
   deleteLocalModel,
   findModel,
@@ -24,7 +25,15 @@ import { buildSystemPrompt } from "./prompt.js";
 import { SessionStore } from "./session.js";
 import { scanSkills } from "./skills.js";
 import { createToolRegistry } from "./tools/index.js";
-import type { ChatMessage } from "./types.js";
+import type { ChatMessage, ContentPart } from "./types.js";
+import {
+  boundaryOf,
+  MAX_ATTACHMENTS,
+  MAX_UPLOAD_BYTES,
+  parseMultipart,
+  resolveUpload,
+  saveUpload,
+} from "./uploads.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -39,21 +48,38 @@ const MAX_CONTENT = 100_000;
 interface ServerArgs {
   port: number;
   host: string;
+  maxMode: PermissionMode;
+}
+
+/** Highest shell permission the server operator grants to browsers. */
+let maxMode: PermissionMode = parseMode(process.env.TSA_MAX_MODE, "smart");
+
+function isLoopback(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
 function parseServerArgs(argv: string[]): ServerArgs {
   const args: ServerArgs = {
     port: Number(process.env.TSA_PORT ?? "8787"),
     host: process.env.TSA_HOST ?? "127.0.0.1",
+    maxMode: parseMode(process.env.TSA_MAX_MODE, "smart"),
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--port" || a === "-p") args.port = Number(argv[++i] ?? args.port);
     else if (a === "--host") args.host = argv[++i] ?? args.host;
+    else if (a === "--max-mode") args.maxMode = parseMode(argv[++i], "smart");
     else if (a === "--help" || a === "-h") {
       console.log(`ts-agent web gateway
 
-Usage: node dist/server.js [--port 8787] [--host 127.0.0.1]
+Usage: node dist/server.js [--port 8787] [--host 127.0.0.1] [--max-mode smart]
+
+Options
+  --port <n>        listen port (default 8787)
+  --host <addr>     bind address (default 127.0.0.1)
+  --max-mode <m>    highest shell permission browsers may pick:
+                    off | strict | smart | auto  (default smart)
 
 Endpoints
   GET  /                       chat UI
@@ -116,6 +142,25 @@ function readBody(req: http.IncomingMessage): Promise<string> {
       chunks.push(chunk);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+/** Binary-safe body reader for multipart uploads. */
+function readRawBody(req: http.IncomingMessage, limit: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error(`上传内容过大（上限 ${Math.round(limit / 1024 / 1024)} MB）`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
@@ -188,6 +233,48 @@ function requestApproval(
   });
 }
 
+/** POST /api/upload — multipart form, one or more `file` fields. */
+async function handleUpload(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const boundary = boundaryOf(String(req.headers["content-type"] ?? ""));
+  if (!boundary) {
+    json(res, 400, { error: "需要 multipart/form-data" });
+    return;
+  }
+
+  let body: Buffer;
+  try {
+    body = await readRawBody(req, MAX_UPLOAD_BYTES + 1024 * 1024);
+  } catch (err) {
+    json(res, 413, { error: (err as Error).message });
+    return;
+  }
+
+  const files: unknown[] = [];
+  for (const part of parseMultipart(body, boundary)) {
+    if (!part.filename || !part.data.length) continue;
+    try {
+      const rec = saveUpload(STATE_DIR, part.filename, part.contentType, part.data);
+      files.push({
+        id: rec.id,
+        name: rec.name,
+        size: rec.size,
+        mime: rec.mime,
+        kind: rec.kind,
+        url: `/uploads/${encodeURIComponent(rec.id)}`,
+      });
+    } catch (err) {
+      json(res, 400, { error: (err as Error).message });
+      return;
+    }
+  }
+
+  if (!files.length) {
+    json(res, 400, { error: "没有收到文件" });
+    return;
+  }
+  json(res, 200, { files });
+}
+
 /** POST /api/chat/approve — the browser's answer to an approval prompt. */
 async function handleApprove(
   req: http.IncomingMessage,
@@ -224,6 +311,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     message?: string;
     system?: string;
     temperature?: number;
+    mode?: string;
+    attachments?: unknown;
   };
   try {
     payload = JSON.parse(await readBody(req));
@@ -272,6 +361,57 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
   const customSystem =
     typeof payload.system === "string" ? payload.system.trim().slice(0, MAX_CONTENT) : "";
 
+  // Permission model: the browser may ask for less autonomy, never more.
+  // Remote callers are always pinned to strict.
+  const requestedMode = parseMode(payload.mode, maxMode);
+  const mode: PermissionMode = isLoopback(req.socket.remoteAddress)
+    ? clampMode(requestedMode, maxMode)
+    : "strict";
+
+  // Attachments: text is inlined, images become image_url parts when the
+  // model can see, everything else is handed over as a path for the tools.
+  const attachmentIds = Array.isArray(payload.attachments)
+    ? (payload.attachments as { id?: unknown }[])
+        .map((a) => String(a?.id ?? ""))
+        .filter(Boolean)
+        .slice(0, MAX_ATTACHMENTS)
+    : [];
+
+  let userContent: string | ContentPart[] = message;
+  if (attachmentIds.length) {
+    const notes: string[] = [];
+    const images: ContentPart[] = [];
+
+    for (const id of attachmentIds) {
+      const rec = resolveUpload(STATE_DIR, id);
+      if (!rec) {
+        notes.push(`（附件 ${id} 不存在或已被删除）`);
+        continue;
+      }
+
+      if (rec.kind === "image" && entry.vision) {
+        if (rec.size > 4 * 1024 * 1024) {
+          notes.push(`（图片 ${rec.name} 超过 4 MB，未随消息发送；路径 .tsagent/uploads/${rec.id}）`);
+        } else {
+          const b64 = fs.readFileSync(rec.abs).toString("base64");
+          images.push({ type: "image_url", image_url: { url: `data:${rec.mime};base64,${b64}` } });
+          notes.push(`（图片 ${rec.name} 已随消息附上）`);
+        }
+      } else if (rec.kind === "text" && rec.size <= 200_000) {
+        const text = fs.readFileSync(rec.abs, "utf8").slice(0, 50_000);
+        notes.push(`### 附件：${rec.name}\n\`\`\`\n${text}\n\`\`\``);
+      } else {
+        notes.push(
+          `（附件 ${rec.name}，${Math.round(rec.size / 1024)} KB，${rec.mime}，` +
+            `路径 .tsagent/uploads/${rec.id}；需要时用 read_file 读取）`,
+        );
+      }
+    }
+
+    const combined = [message, ...notes].filter(Boolean).join("\n\n");
+    userContent = images.length ? [{ type: "text", text: combined }, ...images] : combined;
+  }
+
   const controller = new AbortController();
   const myApprovals = new Set<string>();
   res.on("close", () => {
@@ -298,6 +438,8 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     sessionId: session.id,
     model: entry.id,
     provider: entry.provider ?? "custom",
+    mode,
+    maxMode,
   });
 
   const started = Date.now();
@@ -325,11 +467,12 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
       onIteration: (index) => send({ type: "iteration", index }),
     },
     approve: ({ action, detail }) => requestApproval(send, action, detail, myApprovals),
+    mode,
     signal: () => controller.signal,
   });
 
   try {
-    const answer = await agent.run(message, (delta) => {
+    const answer = await agent.run(userContent, (delta) => {
       chars += delta.length;
       send({ type: "delta", text: delta });
     });
@@ -574,6 +717,7 @@ const server = http.createServer((req, res) => {
         source: getCatalog().source,
         busySessions: busySessions.size,
         pendingApprovals: approvals.size,
+        maxMode,
       });
       return;
     }
@@ -602,6 +746,22 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    if (pathname.startsWith("/uploads/")) {
+      const id = decodeURIComponent(pathname.slice("/uploads/".length));
+      const rec = resolveUpload(STATE_DIR, id);
+      if (!rec) {
+        json(res, 404, { error: "文件不存在" });
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": rec.mime,
+        "content-length": rec.size,
+        "cache-control": "private, max-age=3600",
+      });
+      fs.createReadStream(rec.abs).pipe(res);
+      return;
+    }
+
     if (serveStatic(res, pathname)) return;
     if (pathname === "/favicon.ico") {
       res.writeHead(204);
@@ -616,6 +776,13 @@ const server = http.createServer((req, res) => {
     const session = sessionStore.create();
     sessionStore.save(session);
     json(res, 200, { id: session.id });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/upload") {
+    void handleUpload(req, res).catch((err) => {
+      if (!res.headersSent) json(res, 500, { error: (err as Error).message });
+    });
     return;
   }
 
@@ -674,6 +841,7 @@ const server = http.createServer((req, res) => {
 });
 
 const args = parseServerArgs(process.argv.slice(2));
+maxMode = args.maxMode;
 
 server.on("error", (err: NodeJS.ErrnoException) => {
   if (err.code === "EADDRINUSE") {
@@ -688,6 +856,7 @@ server.listen(args.port, args.host, () => {
   const addr = server.address();
   const port = typeof addr === "object" && addr ? addr.port : args.port;
   console.log(`\n  ts-agent web  ->  http://${args.host}:${port}\n`);
+  console.log(`  shell policy: max=${args.maxMode} (browsers may choose lower)`);
   console.log(`  models (${getCatalog().source}):`);
   for (const entry of getCatalog().entries) {
     const pub = toPublic(entry, env);

@@ -15,7 +15,7 @@ const root = path.resolve(here, "..");
 const entry = path.join(root, "dist", "server.js");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const stats = { calls: 0 };
+const stats = { calls: 0, lastMessages: [] };
 
 /* ---------------- mock upstream ---------------- */
 
@@ -29,6 +29,7 @@ const upstream = http.createServer((req, res) => {
   req.on("end", async () => {
     stats.calls += 1;
     const body = JSON.parse(raw || "{}");
+    stats.lastMessages = body.messages ?? [];
     const userText = [...(body.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "";
     const lastMsg = (body.messages ?? [])[body.messages.length - 1];
     const hadTool = lastMsg?.role === "tool";
@@ -49,7 +50,15 @@ const upstream = http.createServer((req, res) => {
 
     res.writeHead(200, { "content-type": "text/event-stream" });
 
-    if (/run-a-shell/.test(userText) && !hadTool) {
+    // Pick the command the mock asks the agent to run.
+    let toolCommand = null;
+    if (!hadTool) {
+      if (/run-safe/.test(userText)) toolCommand = "echo safe-ok";
+      else if (/run-danger/.test(userText)) toolCommand = "echo DANGER_RAN > danger_probe.txt";
+      else if (/run-a-shell/.test(userText)) toolCommand = "echo SHOULD_NOT_RUN > probe.txt";
+    }
+
+    if (toolCommand) {
       sse(res, {
         choices: [
           {
@@ -59,10 +68,7 @@ const upstream = http.createServer((req, res) => {
                   index: 0,
                   id: "call_1",
                   type: "function",
-                  function: {
-                    name: "shell",
-                    arguments: JSON.stringify({ command: "echo SHOULD_NOT_RUN > probe.txt" }),
-                  },
+                  function: { name: "shell", arguments: JSON.stringify({ command: toolCommand }) },
                 },
               ],
             },
@@ -306,6 +312,101 @@ async function main() {
     assert.equal(conflict.status, 409, "second concurrent turn must be rejected");
     await slow.then((r) => r.text());
 
+    /* ---- permission modes ---- */
+    async function runWithMode(mode, message) {
+      const res = await chat(base, { modelId: "mock", message, mode });
+      const approvals = [];
+      const events = await collect(res, (evt) => {
+        if (evt.type === "approval") {
+          approvals.push(evt);
+          void fetch(`${base}/api/chat/approve`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ approvalId: evt.approvalId, approved: true }),
+          });
+        }
+      });
+      const start = events.find((e) => e.type === "start");
+      const toolEnd = events.find((e) => e.type === "tool_end");
+      const text = events.filter((e) => e.type === "delta").map((e) => e.text).join("");
+      return {
+        mode: start?.mode,
+        approvals: approvals.length,
+        text,
+        toolPreview: toolEnd?.preview ?? "",
+      };
+    }
+
+    const safeSmart = await runWithMode("smart", "run-safe");
+    assert.equal(safeSmart.approvals, 0, "smart: a safe command runs without asking");
+    assert.equal(safeSmart.text, "done-with-tool");
+
+    const dangerSmart = await runWithMode("smart", "run-danger");
+    assert.equal(dangerSmart.approvals, 1, "smart: a dangerous command asks");
+    assert.ok(fs.existsSync(path.join(root, "danger_probe.txt")), "approved command really ran");
+
+    const safeStrict = await runWithMode("strict", "run-safe");
+    assert.equal(safeStrict.approvals, 1, "strict: even safe commands ask");
+
+    const offRun = await runWithMode("off", "run-safe");
+    assert.equal(offRun.approvals, 0, "off: nothing to approve");
+    assert.match(offRun.toolPreview, /disabled/i, "off: shell reports that it is disabled");
+
+    const autoRun = await runWithMode("auto", "run-safe");
+    assert.equal(autoRun.mode, "smart", "auto must be clamped to the server ceiling");
+
+    /* ---- uploads ---- */
+    function multipart(name, type, data) {
+      const boundary = "----tsagent-test";
+      const body = Buffer.concat([
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\n` +
+            `Content-Type: ${type}\r\n\r\n`,
+        ),
+        Buffer.from(data),
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ]);
+      return { body, contentType: `multipart/form-data; boundary=${boundary}` };
+    }
+
+    const mp = multipart("notes.txt", "text/plain", "SECRET_MARKER_42");
+    const upRes = await fetch(`${base}/api/upload`, {
+      method: "POST",
+      headers: { "content-type": mp.contentType },
+      body: mp.body,
+    });
+    assert.equal(upRes.status, 200);
+    const upJson = await upRes.json();
+    assert.ok(upJson.files[0].id, "upload returns an id");
+    assert.equal(upJson.files[0].kind, "text");
+    assert.equal(upJson.files[0].size, 16);
+
+    const preview = await fetch(`${base}${upJson.files[0].url}`);
+    assert.equal(preview.status, 200);
+    assert.equal(await preview.text(), "SECRET_MARKER_42");
+
+    const withAttach = await chat(base, {
+      modelId: "mock",
+      message: "summarize this",
+      attachments: [{ id: upJson.files[0].id }],
+    });
+    assert.equal(withAttach.status, 200);
+    await collect(withAttach);
+    const lastUser = [...stats.lastMessages].reverse().find((m) => m.role === "user");
+    const content =
+      typeof lastUser?.content === "string" ? lastUser.content : JSON.stringify(lastUser?.content);
+    assert.match(content, /SECRET_MARKER_42/, "text attachment must be inlined into the turn");
+
+    const badUpload = await fetch(`${base}/api/upload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ x: 1 }),
+    });
+    assert.equal(badUpload.status, 400);
+
+    const missingFile = await fetch(`${base}/uploads/nope.txt`);
+    assert.equal(missingFile.status, 404);
+
     /* ---- SSRF guard ---- */
     const { webFetchTool } = await import(
       pathToFileURL(path.join(root, "dist", "tools", "web.js")).href
@@ -330,6 +431,7 @@ async function main() {
     upstream.close();
     fs.rmSync(tmp, { recursive: true, force: true });
     fs.rmSync(path.join(root, "probe.txt"), { force: true });
+    fs.rmSync(path.join(root, "danger_probe.txt"), { force: true });
   }
 }
 

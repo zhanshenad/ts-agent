@@ -44,7 +44,13 @@ export class SessionStore {
     session.updatedAt = new Date().toISOString();
     if (!session.title || session.title === "untitled") {
       const firstUser = session.messages.find((m) => m.role === "user" && m.content);
-      if (firstUser?.content) session.title = firstUser.content.slice(0, 60).replace(/\s+/g, " ");
+      if (firstUser?.content) {
+        const text =
+          typeof firstUser.content === "string"
+            ? firstUser.content
+            : firstUser.content.map((p) => (p.type === "text" ? p.text : "[image]")).join(" ");
+        session.title = text.slice(0, 60).replace(/\s+/g, " ");
+      }
     }
     fs.writeFileSync(this.file(session.id), JSON.stringify(session, null, 2), "utf8");
   }

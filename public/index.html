@@ -22,6 +22,15 @@
         </div>
 
         <div class="actions">
+          <div class="mode-picker">
+            <label for="mode">权限</label>
+            <select id="mode" title="shell 权限模式">
+              <option value="strict">严格</option>
+              <option value="smart" selected>智能</option>
+              <option value="auto">自动</option>
+              <option value="off">关闭</option>
+            </select>
+          </div>
           <button id="btn-settings" class="icon" title="设置" aria-label="设置">⚙</button>
           <button id="btn-clear" class="icon" title="清空对话" aria-label="清空对话">🗑</button>
         </div>
@@ -40,11 +49,14 @@
       </main>
 
       <footer class="composer">
+        <div id="attachments" class="attachments" hidden></div>
         <div class="input-wrap">
+          <button id="btn-attach" class="icon attach" title="上传文件（图片 / 文档 / 代码）" aria-label="上传文件">📎</button>
+          <input id="file-input" type="file" multiple hidden />
           <textarea
             id="input"
             rows="1"
-            placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
+            placeholder="输入消息，Enter 发送 · Shift+Enter 换行 · 可拖入文件"
             spellcheck="false"
           ></textarea>
           <button id="btn-send" class="send" aria-label="发送">↑</button>

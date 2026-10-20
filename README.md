@@ -30,6 +30,8 @@ Allow? [y/N] y
 | 模型接入 | `src/llm.ts` | 任何 OpenAI 兼容的 `/chat/completions`：OpenAI、DeepSeek、通义/DashScope、Ollama、vLLM… |
 | 中断 | `src/index.ts` | Ctrl+C 取消当前请求，会话已落盘 |
 | Web 界面 | `src/server.ts` + `public/` | 完整的 agent 循环（工具 / 技能 / 记忆 / 会话）+ 工具卡片 + 审批弹窗；同时提供 OpenAI 兼容的 `/v1/chat/completions` |
+| 命令权限 | `src/permissions.ts` | 四档模式：关闭 / 严格 / 智能 / 自动，服务端可设上限 |
+| 文件上传 | `src/uploads.ts` | 图片、文档、代码拖入即传；文本内联、图片走多模态、其余交给工具按路径读 |
 
 ## 快速开始
 
@@ -90,6 +92,8 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 
 - **选模型**：下拉框按 provider 分组，未配置 key 的模型会标注出来但仍可选（选中后请求会明确报错）
 - **完整 agent 能力**：不是单轮聊天——模型可以连续调用工具（读写文件、grep、抓网页、查记忆、加载技能），每一步都实时显示
+- **命令权限**：顶栏可切「严格 / 智能 / 自动 / 关闭」，服务端可设上限
+- **文件上传**：点 📎 或直接把文件拖进窗口，图片、文档、代码都行
 - **工具卡片**：显示工具名、参数、状态（运行中 / 完成 / 失败）和输出摘要
 - **审批弹窗**：`shell` 这类危险工具会停下来问你，点「允许」才执行；120 秒不回答自动拒绝
 - **会话持久化**：每轮写入 `.tsagent/sessions/`，刷新页面自动恢复上次对话
@@ -124,6 +128,46 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 - 「测试」按钮会发一次 `max_tokens=8` 的最小请求，只在你点击时才发出
 - 存储路径可用 `TSA_MODELS_LOCAL_FILE` 覆盖
 
+### 命令权限
+
+`shell` 工具的执行权由模式决定：
+
+| 模式 | 行为 |
+| --- | --- |
+| `off`（关闭） | 完全禁用，工具直接返回「已禁用」 |
+| `strict`（严格） | 每条命令都必须人工确认 |
+| `smart`（智能，默认） | 只读命令（`ls`/`cat`/`git status`/`npm test`…）直接跑，其余一律确认 |
+| `auto`（自动） | 全部直接跑 |
+
+判定逻辑在 `src/permissions.ts`：先匹配危险模式（`rm`、`del`、重定向 `>`、`git push`、`npm install`、管道进 shell…），**任何片段命中即危险**；再要求整条命令命中只读白名单才算安全；两者都不匹配按危险处理（保守）。
+
+权限上限由服务端掌握，浏览器只能往下调：
+
+```bash
+node dist/server.js --max-mode smart     # 默认：前端最多能选到「智能」
+node dist/server.js --max-mode auto      # 放开「自动」，自担风险
+node dist/server.js --max-mode strict    # 只允许「严格」和「关闭」
+```
+
+- 请求里的 `mode` 会被 `clampMode()` 夹到上限，`start` 事件返回实际生效的 `mode`
+- **非本机访问一律强制 `strict`**，避免局域网里有人直接把 shell 开到 auto
+- CLI 默认 `strict`；`--mode smart|auto|off` 可改，`--yes` 等价于 `auto`
+
+### 文件上传
+
+点输入框左边的 📎，或把文件直接拖进页面。单文件上限 10 MB，一次最多 10 个。
+
+文件存到 `.tsagent/uploads/<8位id>-<安全文件名>`，然后按类型处理：
+
+| 类型 | 处理方式 |
+| --- | --- |
+| 文本 / 代码 / 文档（`.txt .md .json .csv .ts .py .sql` …） | 内容内联进这一轮消息（截断 50 KB），模型直接看到 |
+| 图片（`.png .jpg .webp` …）且模型标记了 `vision: true` | 转成 `image_url` 多模态块发给模型 |
+| 图片但模型不支持视觉 | 只给路径，提示模型用 `read_file` |
+| 其他二进制（zip、pdf…） | 只给路径和大小，交给工具处理 |
+
+`models.json` 里给模型加 `"vision": true` 即可启用看图，例如内置的 `qwen-vl-max`。
+
 ### 接口
 
 | 方法 | 路径 | 说明 |
@@ -137,6 +181,8 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 | GET | `/api/sessions/:id` | 取会话历史（含 tool 消息） |
 | POST | `/api/chat` | 完整 agent 一轮，SSE 流式，见下表 |
 | POST | `/api/chat/approve` | 回答审批：`{approvalId, approved}` |
+| POST | `/api/upload` | multipart 上传，返回 `{files:[{id,name,size,mime,kind,url}]}` |
+| GET | `/uploads/:id` | 回显已上传的文件 |
 | POST | `/v1/chat/completions` | OpenAI 兼容（**纯 chat**，不走工具循环） |
 | GET | `/api/health` | 健康检查 |
 
@@ -144,12 +190,20 @@ npm run serve          # 启动，默认 http://127.0.0.1:8787
 
 ```json
 // 请求
-{ "sessionId": "可选", "modelId": "qwen-plus", "message": "帮我看看 src 里的代码", "system": "", "temperature": 0.7 }
+{
+  "sessionId": "可选",
+  "modelId": "qwen-plus",
+  "message": "帮我看看这个文件",
+  "system": "",
+  "temperature": 0.7,
+  "mode": "smart",
+  "attachments": [{ "id": "1a2b3c4d-notes.md" }]
+}
 ```
 
 | 事件 | 含义 |
 | --- | --- |
-| `start` | `{sessionId, model}`，新会话时前端要记住 `sessionId` |
+| `start` | `{sessionId, model, mode, maxMode}`，新会话时前端要记住 `sessionId` |
 | `iteration` | 第几轮工具循环 |
 | `delta` | `{text}` 模型输出的增量文本 |
 | `tool_start` | `{name, args}` 开始调用工具 |
@@ -262,8 +316,8 @@ export const hello: Tool = {
 
 | 命令 | 层 | 覆盖 |
 | --- | --- | --- |
-| `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` 链接 / 代码块）、`globToRegExp`、路径沙箱、模型配置校验、记忆检索、wire 格式、system prompt |
-| `npm run test:api` | 集成 | 审批拒绝与超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、SSRF |
+| `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` / 代码块）、命令风险判定、权限夹取、上传文件名清洗、multipart 解析、`globToRegExp`、路径沙箱、模型配置、记忆检索、wire 格式 |
+| `npm run test:api` | 集成 | 四种权限模式、权限上限降级、审批拒绝/超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、上传与附件注入、SSRF |
 | `npm run test:web` | 集成 | Web 网关主链路：模型列表不泄 key、SSE 帧、工具调用、会话落盘 |
 | `npm run test:cli` | 集成 | 工具循环、会话落盘、shell 审批、路径穿越、edit/grep 往返 |
 | `npm run test:retry` | 回归 | 连接被重置后重试（`fetch failed` 的回归用例） |

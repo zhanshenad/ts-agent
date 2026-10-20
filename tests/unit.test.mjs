@@ -20,6 +20,8 @@ const { searchMemory, memoryFiles } = await load("dist/memory.js");
 const { parseDotEnv } = await load("dist/config.js");
 const { wireMessages, wireTools } = await load("dist/llm.js");
 const { buildSystemPrompt } = await load("dist/prompt.js");
+const { classifyCommand, parseMode, clampMode, needsApproval } = await load("dist/permissions.js");
+const { safeFileName, classifyFile, parseMultipart, boundaryOf } = await load("dist/uploads.js");
 
 const tmpDirs = [];
 function tmp() {
@@ -352,5 +354,168 @@ describe("buildSystemPrompt", () => {
     assert.ok(prompt.includes("user likes tests"), "memory content");
     assert.ok(prompt.includes("demo: A demo skill"), "skill listing");
     assert.ok(prompt.includes("2026-10-20"), "current date");
+  });
+});
+
+/* ---------------- permission modes ---------------- */
+
+describe("classifyCommand", () => {
+  test("treats read-only commands as safe", () => {
+    for (const cmd of [
+      "ls -la",
+      "dir",
+      "cat README.md",
+      "git status",
+      "git log --oneline",
+      "npm test",
+      "npm run build",
+      "node -v",
+      "pwd",
+    ]) {
+      assert.equal(classifyCommand(cmd), "safe", cmd);
+    }
+  });
+
+  test("flags destructive and side-effecting commands", () => {
+    for (const cmd of [
+      "rm -rf node_modules",
+      "del /q x",
+      "git push origin main",
+      "git reset --hard",
+      "npm install left-pad",
+      "echo hi > out.txt",
+      "ls | sh",
+      "curl -X POST https://x",
+      "chmod +x run.sh",
+      "sudo rm x",
+      "npm run deploy",
+      "",
+    ]) {
+      assert.equal(classifyCommand(cmd), "dangerous", cmd);
+    }
+  });
+
+  test("a dangerous fragment anywhere wins", () => {
+    assert.equal(classifyCommand("cat a.txt && rm -rf b"), "dangerous");
+    assert.equal(classifyCommand("ls; shutdown /s"), "dangerous");
+  });
+
+  test("unknown commands are conservative", () => {
+    assert.equal(classifyCommand("some-random-binary --flag"), "dangerous");
+  });
+});
+
+describe("mode resolution", () => {
+  test("parses english and chinese aliases", () => {
+    assert.equal(parseMode("strict"), "strict");
+    assert.equal(parseMode("严格"), "strict");
+    assert.equal(parseMode("智能"), "smart");
+    assert.equal(parseMode("off"), "off");
+    assert.equal(parseMode("auto"), "auto");
+    assert.equal(parseMode("nonsense", "strict"), "strict");
+    assert.equal(parseMode(undefined, "smart"), "smart");
+  });
+
+  test("clamps to the operator ceiling", () => {
+    assert.equal(clampMode("auto", "smart"), "smart");
+    assert.equal(clampMode("strict", "auto"), "strict");
+    assert.equal(clampMode("off", "strict"), "off");
+  });
+
+  test("needsApproval follows the mode", () => {
+    assert.equal(needsApproval("auto", "rm -rf /"), false);
+    assert.equal(needsApproval("strict", "ls"), true);
+    assert.equal(needsApproval("smart", "ls"), false);
+    assert.equal(needsApproval("smart", "rm -rf /"), true);
+    assert.equal(needsApproval("off", "rm -rf /"), false);
+  });
+});
+
+/* ---------------- uploads ---------------- */
+
+describe("safeFileName", () => {
+  test("strips directories and traversal", () => {
+    assert.equal(safeFileName("../../etc/passwd"), "passwd");
+    assert.equal(safeFileName("C:\\Windows\\system.ini"), "system.ini");
+    assert.equal(safeFileName(".bashrc"), "bashrc");
+  });
+
+  test("keeps readable names, replaces separators", () => {
+    assert.equal(safeFileName("my report (1).txt"), "my_report_1_.txt");
+    assert.equal(safeFileName("报告 v2.md"), "报告_v2.md");
+  });
+
+  test("falls back for empty input", () => {
+    assert.equal(safeFileName(""), "file");
+  });
+});
+
+describe("classifyFile", () => {
+  test("detects images", () => {
+    assert.equal(classifyFile("a.png", "image/png"), "image");
+    assert.equal(classifyFile("photo.JPG", ""), "image");
+  });
+
+  test("detects text and code", () => {
+    assert.equal(classifyFile("notes.md", "text/markdown"), "text");
+    assert.equal(classifyFile("main.ts", ""), "text");
+    assert.equal(classifyFile("data.json", "application/json"), "text");
+  });
+
+  test("falls back to binary", () => {
+    assert.equal(classifyFile("app.exe", "application/octet-stream"), "binary");
+    assert.equal(classifyFile("archive.zip", ""), "binary");
+  });
+});
+
+describe("parseMultipart", () => {
+  const boundary = "----test-boundary";
+
+  function build(parts) {
+    const chunks = [];
+    for (const p of parts) {
+      chunks.push(
+        Buffer.from(
+          `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="${p.name}"; filename="${p.filename}"\r\n` +
+            `Content-Type: ${p.type}\r\n\r\n`,
+        ),
+      );
+      chunks.push(Buffer.isBuffer(p.data) ? p.data : Buffer.from(p.data));
+      chunks.push(Buffer.from("\r\n"));
+    }
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    return Buffer.concat(chunks);
+  }
+
+  test("reads the boundary from a content-type header", () => {
+    assert.equal(boundaryOf(`multipart/form-data; boundary=${boundary}`), boundary);
+    assert.equal(boundaryOf("application/json"), undefined);
+  });
+
+  test("extracts a single text file", () => {
+    const parts = parseMultipart(build([{ name: "file", filename: "a.txt", type: "text/plain", data: "hello" }]), boundary);
+    assert.equal(parts.length, 1);
+    assert.equal(parts[0].filename, "a.txt");
+    assert.equal(parts[0].contentType, "text/plain");
+    assert.equal(parts[0].data.toString("utf8"), "hello");
+  });
+
+  test("extracts multiple files and keeps binary bytes intact", () => {
+    const binary = Buffer.from([0x00, 0xff, 0x10, 0x0a, 0x0d]);
+    const parts = parseMultipart(
+      build([
+        { name: "file", filename: "one.txt", type: "text/plain", data: "first" },
+        { name: "file", filename: "two.bin", type: "application/octet-stream", data: binary },
+      ]),
+      boundary,
+    );
+    assert.equal(parts.length, 2);
+    assert.equal(parts[0].data.toString("utf8"), "first");
+    assert.deepEqual([...parts[1].data], [...binary]);
+  });
+
+  test("ignores a body without the boundary", () => {
+    assert.deepEqual(parseMultipart(Buffer.from("garbage"), boundary), []);
   });
 });
