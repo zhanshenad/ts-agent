@@ -176,10 +176,16 @@ node dist/server.js --max-mode strict    # 只允许「严格」和「关闭」
 | --- | --- |
 | 文本 / 代码 / 文档（`.txt .md .json .csv .ts .py .sql` …） | 内容内联进这一轮消息（截断 50 KB），模型直接看到 |
 | 图片（`.png .jpg .webp` …）且模型标记了 `vision: true` | 转成 `image_url` 多模态块发给模型 |
-| 图片但模型不支持视觉 | 只给路径，提示模型用 `read_file` |
+| 图片但模型不支持视觉 | 明确告诉模型「你看不到画面」，让它转告用户换模型或改用文字描述；**不会**再给它路径去 `read_file` |
 | 其他二进制（zip、pdf…） | 只给路径和大小，交给工具处理 |
 
 `models.json` 里给模型加 `"vision": true` 即可启用看图，例如内置的 `qwen-vl-max`。
+页面的模型下拉会给这类模型标「可看图」，设置面板也会显示当前模型是「支持图片」还是「仅文本」。
+
+> ⚠️ `deepseek-chat`、`gpt-4o-mini` 这类是**纯文本模型**，没有视觉输入能力——传图片给它们，
+> 它们真的看不见，这不是框架的问题。要读图请选 `qwen-vl-max` 这类视觉模型。
+
+`read_file` 遇到二进制会直接拒绝并说明原因（图片会额外提示换视觉模型），不会再把 JPEG 当文本吐一堆乱码。
 
 ### 接口
 
@@ -329,7 +335,7 @@ export const hello: Tool = {
 
 | 命令 | 层 | 覆盖 |
 | --- | --- | --- |
-| `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` / 代码块）、命令风险判定、权限夹取、上传文件名清洗、multipart 解析、`globToRegExp`、路径沙箱、模型配置、记忆检索、wire 格式 |
+| `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` / 代码块）、命令风险判定、权限夹取、上传文件名清洗、multipart 解析、`read_file` 二进制防护、`globToRegExp`、路径沙箱、模型配置、记忆检索、wire 格式 |
 | `npm run test:api` | 集成 | 四种权限模式、权限上限降级、审批拒绝/超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、上传与附件注入、SSRF |
 | `npm run test:web` | 集成 | Web 网关主链路：模型列表不泄 key、SSE 帧、工具调用、会话落盘 |
 | `npm run test:cli` | 集成 | 工具循环、会话落盘、shell 审批、路径穿越、edit/grep 往返 |

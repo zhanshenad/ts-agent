@@ -48,14 +48,35 @@ const readFile: Tool = {
   },
   async run(args, ctx) {
     const file = resolveInWorkspace(ctx.workspace, str(args, "path"));
-    let raw: string;
+    let buf: Buffer;
     try {
       const stat = fs.statSync(file);
       if (stat.isDirectory()) throw new ToolError(`${file} is a directory; use list_dir`);
-      raw = fs.readFileSync(file, "utf8");
+      buf = fs.readFileSync(file);
     } catch (err) {
       throw new ToolError(`Cannot read ${file}: ${(err as Error).message}`);
     }
+
+    const rel = relativeTo(ctx.workspace, file);
+    const head = buf.subarray(0, 8192);
+
+    // A NUL byte means this is not text. Returning mojibake teaches the model
+    // nothing, so refuse with an explanation instead.
+    if (head.includes(0)) {
+      if (/\.(png|jpe?g|gif|webp|bmp|avif|ico|tiff?)$/i.test(file)) {
+        throw new ToolError(
+          `${rel} is an image file (${buf.length} bytes). A text tool cannot show you the picture. ` +
+            `If your current model has no vision input, tell the user to switch to a vision-capable model ` +
+            `(for example qwen-vl-max) or ask them to describe the image in words.`,
+        );
+      }
+      throw new ToolError(
+        `${rel} is a binary file (${buf.length} bytes). read_file only reads text; ` +
+          `use grep/glob to search text, or ask the user what it contains.`,
+      );
+    }
+
+    const raw = buf.toString("utf8");
     const lines = raw.split(/\r?\n/);
     const start = Math.max(1, numArg(args, "start_line") ?? 1);
     const end = Math.min(lines.length, numArg(args, "end_line") ?? start + 400);
@@ -68,7 +89,7 @@ const readFile: Tool = {
     }
     return {
       content:
-        `${relativeTo(ctx.workspace, file)} (${lines.length} lines, showing ${start}-${end})\n` +
+        `${rel} (${lines.length} lines, showing ${start}-${end})\n` +
         `---\n${body}${note}`,
     };
   },

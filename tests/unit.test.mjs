@@ -22,6 +22,7 @@ const { wireMessages, wireTools } = await load("dist/llm.js");
 const { buildSystemPrompt } = await load("dist/prompt.js");
 const { classifyCommand, parseMode, clampMode, needsApproval } = await load("dist/permissions.js");
 const { safeFileName, classifyFile, parseMultipart, boundaryOf } = await load("dist/uploads.js");
+const { fileTools } = await load("dist/tools/fs.js");
 
 const tmpDirs = [];
 function tmp() {
@@ -354,6 +355,53 @@ describe("buildSystemPrompt", () => {
     assert.ok(prompt.includes("user likes tests"), "memory content");
     assert.ok(prompt.includes("demo: A demo skill"), "skill listing");
     assert.ok(prompt.includes("2026-10-20"), "current date");
+  });
+});
+
+/* ---------------- read_file binary guard ---------------- */
+
+describe("read_file refuses binaries", () => {
+  const readTool = fileTools.find((t) => t.spec.name === "read_file");
+  const ctx = (workspace) => ({
+    workspace,
+    homeDir: workspace,
+    sessionId: "t",
+    mode: "auto",
+    approve: async () => true,
+    log: () => {},
+  });
+
+  test("an image produces a vision hint, not mojibake", async () => {
+    const dir = tmp();
+    fs.writeFileSync(
+      path.join(dir, "shot.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]),
+    );
+    await assert.rejects(
+      () => readTool.run({ path: "shot.png" }, ctx(dir)),
+      /image file.*vision|vision-capable/i,
+    );
+  });
+
+  test("any other binary is rejected too", async () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, "blob.bin"), Buffer.from([0x00, 0x01, 0x02, 0x03]));
+    await assert.rejects(() => readTool.run({ path: "blob.bin" }, ctx(dir)), /binary file/i);
+  });
+
+  test("utf-8 text still reads normally", async () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, "a.txt"), "hello\nworld\n", "utf8");
+    const res = await readTool.run({ path: "a.txt" }, ctx(dir));
+    assert.match(res.content, /hello/);
+    assert.match(res.content, /2: world/);
+  });
+
+  test("chinese text is not mistaken for binary", async () => {
+    const dir = tmp();
+    fs.writeFileSync(path.join(dir, "cn.md"), "# 标题\n\n内容\n", "utf8");
+    const res = await readTool.run({ path: "cn.md" }, ctx(dir));
+    assert.match(res.content, /标题/);
   });
 });
 

@@ -389,13 +389,24 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
         continue;
       }
 
-      if (rec.kind === "image" && entry.vision) {
-        if (rec.size > 4 * 1024 * 1024) {
-          notes.push(`（图片 ${rec.name} 超过 4 MB，未随消息发送；路径 .tsagent/uploads/${rec.id}）`);
+      if (rec.kind === "image") {
+        if (entry.vision) {
+          if (rec.size > 4 * 1024 * 1024) {
+            notes.push(`（图片 ${rec.name} 超过 4 MB，未随消息发送；路径 .tsagent/uploads/${rec.id}）`);
+          } else {
+            const b64 = fs.readFileSync(rec.abs).toString("base64");
+            images.push({ type: "image_url", image_url: { url: `data:${rec.mime};base64,${b64}` } });
+            notes.push(`（图片 ${rec.name} 已随消息附上）`);
+          }
         } else {
-          const b64 = fs.readFileSync(rec.abs).toString("base64");
-          images.push({ type: "image_url", image_url: { url: `data:${rec.mime};base64,${b64}` } });
-          notes.push(`（图片 ${rec.name} 已随消息附上）`);
+          // A text-only model cannot see this. Say so plainly instead of
+          // handing it a path it will try to open with read_file.
+          notes.push(
+            `（用户上传了图片「${rec.name}」，${Math.round(rec.size / 1024)} KB。` +
+              `但当前模型 ${entry.model} 不支持图像输入，你看不到画面内容。` +
+              `请直接告诉用户：换成支持视觉的模型（例如 qwen-vl-max）才能看图，或者请他描述图片；` +
+              `不要用 read_file 读这张图，它只会返回二进制乱码。）`,
+          );
         }
       } else if (rec.kind === "text" && rec.size <= 200_000) {
         const text = fs.readFileSync(rec.abs, "utf8").slice(0, 50_000);
