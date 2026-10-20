@@ -1,0 +1,28 @@
+{
+  "name": "ts-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A minimal, dependency-free TypeScript AI agent with tools, skills, memory and sessions.",
+  "type": "module",
+  "bin": {
+    "tsagent": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "npm run build && node dist/index.js",
+    "serve": "node dist/server.js",
+    "dev:web": "npm run build && node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node tests/smoke.test.mjs && node tests/server.test.mjs",
+    "test:cli": "node tests/smoke.test.mjs",
+    "test:web": "npm run build && node tests/server.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "_comment": "可选的模型目录。apiKeyEnv 指向存放 key 的环境变量（也可写在 .env）；requiresKey=false 用于本地 Ollama / vLLM。改完重启 server.js 生效。",
+  "models": [
+    {
+      "id": "qwen-plus",
+      "label": "Qwen Plus",
+      "provider": "DashScope",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-plus",
+      "apiKeyEnv": "DASHSCOPE_API_KEY"
+    },
+    {
+      "id": "qwen-max",
+      "label": "Qwen Max",
+      "provider": "DashScope",
+      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-max",
+      "apiKeyEnv": "DASHSCOPE_API_KEY"
+    },
+    {
+      "id": "deepseek-chat",
+      "label": "DeepSeek Chat",
+      "provider": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "apiKeyEnv": "DEEPSEEK_API_KEY"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "label": "GPT-4o mini",
+      "provider": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "apiKeyEnv": "OPENAI_API_KEY"
+    },
+    {
+      "id": "qwen-local",
+      "label": "Qwen 2.5 (Ollama)",
+      "provider": "Local",
+      "baseUrl": "http://localhost:11434/v1",
+      "model": "qwen2.5:7b",
+      "requiresKey": false
+    }
+  ]
+}

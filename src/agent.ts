@@ -1,0 +1,182 @@
+import type { Config } from "./config.js";
+import { chatCompletion } from "./llm.js";
+import type { Session, SessionStore } from "./session.js";
+import type {
+  AgentHooks,
+  ChatMessage,
+  ToolContext,
+  ToolRegistry,
+  ToolResult,
+} from "./types.js";
+
+export interface ApprovalRequest {
+  action: string;
+  detail?: string;
+}
+
+export interface AgentOptions {
+  config: Config;
+  tools: ToolRegistry;
+  session: Session;
+  store: SessionStore;
+  /** Rebuilt on every turn so memory/skill edits take effect immediately. */
+  buildSystemPrompt?: () => string;
+  hooks?: AgentHooks;
+  /** Human approval callback for destructive tools. Defaults to deny. */
+  approve?: (req: ApprovalRequest) => Promise<boolean>;
+  maxIterations?: number;
+  /** Static signal, or a getter so the caller can swap it per turn. */
+  signal?: AbortSignal | (() => AbortSignal | undefined);
+  /** Runner for spawn_subagent; omitted inside subagents to prevent recursion. */
+  subagentRunner?: (task: string) => Promise<string>;
+}
+
+const noopHooks: AgentHooks = {
+  onAssistantText: () => {},
+  onToolStart: () => {},
+  onToolEnd: () => {},
+};
+
+export class Agent {
+  private current: Session;
+  private readonly hooks: AgentHooks;
+
+  constructor(private readonly opts: AgentOptions) {
+    this.hooks = opts.hooks ?? noopHooks;
+    this.current = opts.session;
+  }
+
+  get session(): Session {
+    return this.current;
+  }
+
+  get messages(): ChatMessage[] {
+    return this.current.messages;
+  }
+
+  /** Swap in a different (e.g. freshly created) session in place. */
+  setSession(session: Session): void {
+    this.current = session;
+  }
+
+  private signal(): AbortSignal | undefined {
+    return typeof this.opts.signal === "function" ? this.opts.signal() : this.opts.signal;
+  }
+
+  /** Re-run the system prompt builder and keep it at index 0. */
+  private refreshSystem(): void {
+    if (!this.opts.buildSystemPrompt) {
+      if (this.messages[0]?.role !== "system") {
+        this.messages.unshift({ role: "system", content: "You are a helpful agent." });
+      }
+      return;
+    }
+    const prompt = this.opts.buildSystemPrompt();
+    if (this.messages[0]?.role === "system") this.messages[0].content = prompt;
+    else this.messages.unshift({ role: "system", content: prompt });
+  }
+
+  private toolContext(): ToolContext {
+    return {
+      workspace: this.opts.config.workspace,
+      homeDir: this.opts.config.homeDir,
+      sessionId: this.current.id,
+      approve: async (action, detail) => {
+        if (this.opts.config.autoApprove) return true;
+        if (!this.opts.approve) return false;
+        return await this.opts.approve({ action, detail });
+      },
+      log: (message) => this.hooks.onAssistantText(message),
+    };
+  }
+
+  async run(input: string): Promise<string> {
+    this.refreshSystem();
+    this.messages.push({ role: "user", content: input });
+    this.opts.store.save(this.current);
+
+    const tools = [...this.opts.tools.values()].map((t) => t.spec);
+    const maxIterations = this.opts.maxIterations ?? this.opts.config.maxIterations;
+    let lastText = "";
+
+    for (let i = 0; i < maxIterations; i++) {
+      this.hooks.onIteration?.(i);
+
+      const result = await chatCompletion(
+        this.opts.config,
+        this.messages,
+        tools,
+        { signal: this.signal() },
+      );
+
+      const assistant: ChatMessage = {
+        role: "assistant",
+        content: result.content ?? null,
+      };
+      if (result.toolCalls.length) assistant.tool_calls = result.toolCalls;
+      this.messages.push(assistant);
+
+      if (result.content && result.content.trim()) {
+        lastText = result.content;
+        this.hooks.onAssistantText(result.content);
+      }
+
+      if (!result.toolCalls.length) {
+        this.opts.store.save(this.current);
+        return (result.content ?? lastText).trim();
+      }
+
+      for (const call of result.toolCalls) {
+        const name = call.function.name;
+        const tool = this.opts.tools.get(name);
+
+        let args: Record<string, unknown> = {};
+        let parseError: string | undefined;
+        try {
+          const raw = call.function.arguments?.trim() || "{}";
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          } else {
+            parseError = "Tool arguments must be a JSON object.";
+          }
+        } catch (err) {
+          parseError = `Invalid JSON in tool arguments: ${(err as Error).message}`;
+        }
+
+        this.hooks.onToolStart(name, args);
+
+        let toolResult: ToolResult;
+        if (!tool) {
+          toolResult = {
+            content: `Unknown tool "${name}". Available: ${[...this.opts.tools.keys()].join(", ")}`,
+            isError: true,
+          };
+        } else if (parseError) {
+          toolResult = { content: parseError, isError: true };
+        } else {
+          try {
+            toolResult = await tool.run(args, this.toolContext());
+          } catch (err) {
+            toolResult = { content: `Tool "${name}" failed: ${(err as Error).message}`, isError: true };
+          }
+        }
+
+        this.hooks.onToolEnd(name, toolResult);
+        this.messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          name,
+          content: toolResult.content.slice(0, 100_000),
+        });
+      }
+
+      this.opts.store.save(this.current);
+    }
+
+    const notice = `Stopped after ${maxIterations} tool iterations without a final answer. Ask me to continue, or narrow the task.`;
+    this.messages.push({ role: "assistant", content: notice });
+    this.opts.store.save(this.current);
+    return notice;
+  }
+}

@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TsAgent · 模型网关</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="dot"></span>
+          <span class="name">TsAgent</span>
+          <span class="tag">模型网关</span>
+        </div>
+
+        <div class="model-picker">
+          <label for="model">模型</label>
+          <select id="model" aria-label="选择模型"></select>
+          <span id="model-hint" class="hint"></span>
+        </div>
+
+        <div class="actions">
+          <button id="btn-settings" class="icon" title="设置" aria-label="设置">⚙</button>
+          <button id="btn-clear" class="icon" title="清空对话" aria-label="清空对话">🗑</button>
+        </div>
+      </header>
+
+      <main id="messages" class="messages">
+        <section class="empty" id="empty">
+          <h1>选个模型，开始对话</h1>
+          <p>请求经本地网关转发到各家大模型，key 只留在服务端。</p>
+          <div class="chips">
+            <button class="chip" data-prompt="用三句话解释什么是工具调用（tool calling）">工具调用是什么</button>
+            <button class="chip" data-prompt="把下面这段话压缩成一句：">压缩一段话</button>
+            <button class="chip" data-prompt="用 TypeScript 写一个带超时的 fetch 封装">写个 TS 小工具</button>
+          </div>
+        </section>
+      </main>
+
+      <footer class="composer">
+        <div class="input-wrap">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="输入消息，Enter 发送 · Shift+Enter 换行"
+            spellcheck="false"
+          ></textarea>
+          <button id="btn-send" class="send" aria-label="发送">↑</button>
+          <button id="btn-stop" class="stop" aria-label="停止" hidden>■</button>
+        </div>
+        <div id="status" class="status"></div>
+      </footer>
+    </div>
+
+    <aside id="settings" class="settings" hidden>
+      <div class="settings-head">
+        <h2>设置</h2>
+        <button id="btn-close-settings" class="icon" aria-label="关闭">✕</button>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab active" data-tab="models" role="tab">模型</button>
+        <button class="tab" data-tab="params" role="tab">参数</button>
+      </div>
+
+      <section class="panel" data-panel="models">
+        <div id="model-list" class="model-list"></div>
+        <button id="btn-add-model" class="ghost block">＋ 添加模型</button>
+
+        <form id="model-form" class="model-form" hidden autocomplete="off">
+          <div class="form-title" id="form-title">添加模型</div>
+
+          <label class="fld">
+            <span>显示名</span>
+            <input id="f-label" placeholder="Qwen Plus" />
+          </label>
+          <label class="fld">
+            <span>提供商</span>
+            <input id="f-provider" placeholder="DashScope" />
+          </label>
+          <label class="fld">
+            <span>Base URL</span>
+            <input id="f-baseurl" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" />
+          </label>
+          <label class="fld">
+            <span>模型名</span>
+            <input id="f-model" placeholder="qwen-plus" />
+          </label>
+          <label class="fld">
+            <span>唯一标识</span>
+            <input id="f-id" placeholder="qwen-plus" />
+          </label>
+          <label class="fld">
+            <span>API Key</span>
+            <input id="f-key" type="password" placeholder="留空表示不修改" />
+          </label>
+          <label class="fld checkbox">
+            <input id="f-nokey" type="checkbox" />
+            <span>本地模型，不需要 key</span>
+          </label>
+
+          <div class="form-actions">
+            <button type="submit" class="primary">保存</button>
+            <button type="button" id="btn-cancel-form" class="ghost">取消</button>
+          </div>
+          <p class="form-note" id="form-note"></p>
+        </form>
+      </section>
+
+      <section class="panel" data-panel="params" hidden>
+        <label class="fld">
+          <span>System prompt</span>
+          <textarea id="system" rows="4" placeholder="可选，例如：你是一个简洁的中文技术助手。"></textarea>
+        </label>
+
+        <label class="fld">
+          <span>Temperature <b id="temp-value">0.7</b></span>
+          <input id="temperature" type="range" min="0" max="1.5" step="0.1" value="0.7" />
+        </label>
+
+        <div class="fld">
+          <span>当前模型</span>
+          <div id="model-detail" class="detail"></div>
+        </div>
+
+        <p class="settings-note">
+          模型和 key 保存在服务端 <code id="store-path">models.local.json</code>（明文，已在 .gitignore 中）。
+          key 只写不读，页面只能看到「已配置 / 未配置」。
+        </p>
+      </section>
+    </aside>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

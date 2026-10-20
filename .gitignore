@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.tsagent/
+*.log
+models.local.json
+server.pid
+server.err
