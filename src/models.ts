@@ -15,8 +15,6 @@ export interface ModelEntry {
   temperature?: number;
   /** false for local runtimes (Ollama, vLLM) that need no key. */
   requiresKey?: boolean;
-  /** true when the model accepts image inputs. */
-  vision?: boolean;
   /** Stored only in models.local.json: user removed this model. */
   hidden?: boolean;
 }
@@ -32,7 +30,6 @@ export interface PublicModel {
   hasKey: boolean;
   editable: boolean;
   requiresKey: boolean;
-  vision: boolean;
   reason?: string;
 }
 
@@ -60,7 +57,6 @@ export const DEFAULT_MODELS: ModelEntry[] = [
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     model: "qwen-vl-max",
     apiKeyEnv: "DASHSCOPE_API_KEY",
-    vision: true,
   },
   {
     id: "deepseek-chat",
@@ -158,7 +154,6 @@ function readModelsArray(file: string): { entries: ModelEntry[]; warning?: strin
         apiKeyEnv: m.apiKeyEnv,
         temperature: typeof m.temperature === "number" ? m.temperature : undefined,
         requiresKey: m.requiresKey,
-        vision: m.vision === true,
         hidden: m.hidden === true,
       });
     }
@@ -212,7 +207,6 @@ export function upsertLocalModel(
     apiKey,
     apiKeyEnv: incoming.apiKeyEnv ?? previous?.apiKeyEnv,
     requiresKey: incoming.requiresKey ?? previous?.requiresKey,
-    vision: incoming.vision ?? previous?.vision,
     hidden: false,
   };
 
@@ -305,7 +299,6 @@ export function toPublic(entry: ModelEntry, env: Record<string, string | undefin
     hasKey,
     editable: (entry as { editable?: boolean }).editable === true,
     requiresKey: needsKey,
-    vision: entry.vision === true,
     reason: !needsKey ? undefined : hasKey ? undefined : `missing ${entry.apiKeyEnv ?? "API key"}`,
   };
 }
@@ -342,12 +335,11 @@ export function validateModelInput(body: Record<string, unknown>): Partial<Model
   const label = String(body.label ?? "").trim().slice(0, 80) || id;
   const provider = String(body.provider ?? "").trim().slice(0, 40) || undefined;
   const requiresKey = body.requiresKey === false ? false : true;
-  const vision = body.vision === true;
 
   const rawKey = body.apiKey;
   if (rawKey !== undefined && typeof rawKey !== "string") throw new Error("apiKey 必须是字符串");
   const apiKey = typeof rawKey === "string" ? rawKey.trim() : undefined;
   if (apiKey && apiKey.length > 500) throw new Error("apiKey 过长");
 
-  return { id, label, provider, baseUrl, model, requiresKey, vision, apiKey };
+  return { id, label, provider, baseUrl, model, requiresKey, apiKey };
 }

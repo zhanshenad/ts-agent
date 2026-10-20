@@ -168,15 +168,6 @@ async function main() {
           model: "mock-1",
           apiKey: "k",
         },
-        {
-          id: "mock-vision",
-          label: "Mock Vision",
-          provider: "Test",
-          baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
-          model: "mock-vl",
-          apiKey: "k",
-          vision: true,
-        },
       ],
     }),
   );
@@ -416,7 +407,7 @@ async function main() {
     const missingFile = await fetch(`${base}/uploads/nope.txt`);
     assert.equal(missingFile.status, 404);
 
-    /* ---- images: vision model gets bytes, text model gets a clear refusal ---- */
+    /* ---- images always go out as multimodal parts ---- */
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]);
     const imgMp = multipart("photo.png", "image/png", png);
     const imgRes = await fetch(`${base}/api/upload`, {
@@ -427,33 +418,24 @@ async function main() {
     const imgJson = await imgRes.json();
     assert.equal(imgJson.files[0].kind, "image");
 
-    const noVision = await chat(base, {
+    const withImage = await chat(base, {
       modelId: "mock",
       message: "look at this",
       attachments: [{ id: imgJson.files[0].id }],
     });
-    await collect(noVision);
-    const noVisionUser = [...stats.lastMessages].reverse().find((m) => m.role === "user");
-    const noVisionText =
-      typeof noVisionUser?.content === "string"
-        ? noVisionUser.content
-        : JSON.stringify(noVisionUser?.content);
-    assert.match(noVisionText, /不支持图像输入/, "a text-only model must be told it cannot see");
-    assert.ok(!noVisionText.includes("image_url"), "no image part for a text-only model");
+    await collect(withImage);
 
-    const vision = await chat(base, {
-      modelId: "mock-vision",
-      message: "look at this",
-      attachments: [{ id: imgJson.files[0].id }],
-    });
-    await collect(vision);
-    const visionUser = [...stats.lastMessages].reverse().find((m) => m.role === "user");
-    assert.ok(Array.isArray(visionUser?.content), "vision model gets a multipart body");
+    const imageUser = [...stats.lastMessages].reverse().find((m) => m.role === "user");
+    assert.ok(Array.isArray(imageUser?.content), "image turns use a multipart body");
     assert.ok(
-      visionUser.content.some(
+      imageUser.content.some(
         (p) => p.type === "image_url" && String(p.image_url?.url).startsWith("data:image/png;base64,"),
       ),
       "image must be inlined as a data URL",
+    );
+    assert.ok(
+      imageUser.content.some((p) => p.type === "text" && p.text.includes("look at this")),
+      "the user text must survive alongside the image",
     );
 
     /* ---- SSRF guard ---- */

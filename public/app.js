@@ -125,10 +125,9 @@ function renderModelOptions(data) {
     for (const m of list) {
       const opt = document.createElement("option");
       opt.value = m.id;
-      const visionTag = m.vision ? "（可看图）" : "";
       opt.textContent = m.available
-        ? `${m.label} · ${m.model}${visionTag}`
-        : `${m.label} · ${m.model}${visionTag}（未配置 key）`;
+        ? `${m.label} · ${m.model}`
+        : `${m.label} · ${m.model}（未配置 key）`;
       group.appendChild(opt);
     }
     els.model.appendChild(group);
@@ -164,7 +163,6 @@ function updateModelDetail() {
     `id: <b>${escapeHtml(m.id)}</b>`,
     `provider: ${escapeHtml(m.provider)}`,
     `model: ${escapeHtml(m.model)}`,
-    `视觉: ${m.vision ? "支持图片" : "仅文本（不能看图）"}`,
     `状态: ${m.available ? "可用" : `不可用（${escapeHtml(m.reason ?? "no key")}）`}`,
   ].join("<br>");
 
@@ -796,17 +794,7 @@ async function uploadFiles(fileList) {
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
     state.attachments.push(...(data.files ?? []));
     renderAttachments();
-
-    const images = (data.files ?? []).filter((f) => f.kind === "image");
-    const model = state.models.find((m) => m.id === state.modelId);
-    if (images.length && model && !model.vision) {
-      setStatus(
-        `已添加 ${data.files.length} 个文件。注意：${model.label} 不支持图像输入，图片内容模型看不到。`,
-        true,
-      );
-    } else {
-      setStatus(`已添加 ${data.files?.length ?? 0} 个文件`);
-    }
+    setStatus(`已添加 ${data.files?.length ?? 0} 个文件`);
   } catch (err) {
     setStatus(`上传失败：${err.message}`, true);
   }
