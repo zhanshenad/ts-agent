@@ -90,15 +90,17 @@ async function* parseSSE(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      let sep: number;
-      while ((sep = buffer.indexOf("\n\n")) !== -1) {
-        const raw = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
+      // Accept both LF and CRLF frame separators.
+      let match = /\r?\n\r?\n/.exec(buffer);
+      while (match) {
+        const raw = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
         for (const line of raw.split(/\r?\n/)) {
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload) yield payload;
         }
+        match = /\r?\n\r?\n/.exec(buffer);
       }
     }
     const tail = buffer.trim();

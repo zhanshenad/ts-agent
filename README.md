@@ -333,7 +333,10 @@ export const hello: Tool = {
 | 命令 | 层 | 覆盖 |
 | --- | --- | --- |
 | `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` / 代码块）、命令风险判定、权限夹取、上传文件名清洗、multipart 解析、`read_file` 二进制防护、`globToRegExp`、路径沙箱、模型配置、记忆检索、wire 格式 |
-| `npm run test:api` | 集成 | 四种权限模式、权限上限降级、审批拒绝/超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、上传与附件注入、SSRF |
+| `npm run test:stream` | 单元 | SSE 解析：LF / CRLF、帧跨 chunk、中文被切成半个字符、无 `[DONE]`、keep-alive、畸形帧、tool_calls 分片累积、空流 |
+| `npm run test:tools` | 单元 | 文件工具边界（空文件、越界行号、未命中替换、二进制、非法正则、include 过滤）、shell 超时与 30KB 输出截断、`web_fetch` 协议/体积/HTML 清洗 |
+| `npm run test:api` | 集成 | 四种权限模式、权限上限降级、审批拒绝/超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、上传与附件注入、图片多模态、SSRF |
+| `npm run test:limits` | 集成 | 上传 0 字节 / 超 10MB / 路径穿越 / 多文件、模型并发写 10 次、损坏会话文件、会话 id 穿越、CLI 参数错误 |
 | `npm run test:web` | 集成 | Web 网关主链路：模型列表不泄 key、SSE 帧、工具调用、会话落盘 |
 | `npm run test:cli` | 集成 | 工具循环、会话落盘、shell 审批、路径穿越、edit/grep 往返 |
 | `npm run test:retry` | 回归 | 连接被重置后重试（`fetch failed` 的回归用例） |
@@ -341,7 +344,7 @@ export const hello: Tool = {
 | `npm run test:e2e` | E2E | Chromium 驱动真实页面：发消息、工具卡片、点击审批、刷新恢复、模型管理 |
 | `npm run test:perf` | 非功能 | 10 路并发、40 轮长会话劣化、abort 风暴泄漏、4000 字输出 |
 
-`npm test` 依次跑全部（约 1 分钟，其中 E2E 会启动浏览器）。
+`npm test` 依次跑全部（约 2 分钟，其中 E2E 会启动浏览器）。
 
 E2E 复用机器上已下载的 Playwright Chromium；找不到时设置 `PW_CHROMIUM_PATH`，否则自动跳过（退出码 0）。
 
