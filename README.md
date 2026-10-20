@@ -258,21 +258,24 @@ export const hello: Tool = {
 
 ## 测试
 
-```bash
-npm test
-```
+五层，全部用本地假模型，不联网、不花钱。
 
-冒烟测试会起一个本地假模型服务器（不联网、不花钱），依次验证：
+| 命令 | 层 | 覆盖 |
+| --- | --- | --- |
+| `npm run test:unit` | 单元 | `mdToHtml`（XSS / `javascript:` 链接 / 代码块）、`globToRegExp`、路径沙箱、模型配置校验、记忆检索、wire 格式、system prompt |
+| `npm run test:api` | 集成 | 审批拒绝与超时、409 并发、上游 401/500、畸形 JSON、超大消息、断连释放锁、SSRF |
+| `npm run test:web` | 集成 | Web 网关主链路：模型列表不泄 key、SSE 帧、工具调用、会话落盘 |
+| `npm run test:cli` | 集成 | 工具循环、会话落盘、shell 审批、路径穿越、edit/grep 往返 |
+| `npm run test:retry` | 回归 | 连接被重置后重试（`fetch failed` 的回归用例） |
+| `npm run test:contract` | 契约 | 用官方 `openai` SDK 打 `/v1`：非流式、流式、404 |
+| `npm run test:e2e` | E2E | Chromium 驱动真实页面：发消息、工具卡片、点击审批、刷新恢复、模型管理 |
+| `npm run test:perf` | 非功能 | 10 路并发、40 轮长会话劣化、abort 风暴泄漏、4000 字输出 |
 
-1. 完整工具循环（写文件 → 加载技能 → 写记忆 → 给出结论）
-2. 会话落盘且 `tool` 消息带了 `tool_call_id`
-3. 未加 `--yes` 时 shell 被拒绝、命令确实没执行
-4. 路径越界被拦截
-5. `write_file` / `edit_file` / `grep` 往返正确
+`npm test` 依次跑全部（约 1 分钟，其中 E2E 会启动浏览器）。
 
-Web 网关另有一套（`node tests/server.test.mjs`，也可 `npm run test:web`）：起一个假的 SSE 上游，
-验证 `/api/models` 不下发 key、`/api/chat` 的 start/delta/done 帧、`/v1/chat/completions`
-的流式与非流式、以及错误模型名 / 非法 role 的 400/404。
+E2E 复用机器上已下载的 Playwright Chromium；找不到时设置 `PW_CHROMIUM_PATH`，否则自动跳过（退出码 0）。
+
+**回归纪律**：每修一个 bug，先写一条会失败的用例，再修。`tests/retry.test.mjs` 就是 `fetch failed` 留下的那道疤。
 
 ## 设计取舍
 

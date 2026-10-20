@@ -22,7 +22,7 @@ function endpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
 }
 
-function wireMessages(messages: ChatMessage[]): unknown[] {
+export function wireMessages(messages: ChatMessage[]): unknown[] {
   return messages.map((m) => {
     const base: Record<string, unknown> = { role: m.role, content: m.content };
     if (m.tool_calls?.length) base.tool_calls = m.tool_calls;
@@ -32,7 +32,7 @@ function wireMessages(messages: ChatMessage[]): unknown[] {
   });
 }
 
-function wireTools(tools: ToolSpec[]): unknown[] {
+export function wireTools(tools: ToolSpec[]): unknown[] {
   return tools.map((t) => ({
     type: "function",
     function: { name: t.name, description: t.description, parameters: t.parameters },

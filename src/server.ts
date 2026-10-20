@@ -154,24 +154,35 @@ const agentSkills = scanSkills(path.join(STATE_DIR, "skills"));
 const webTools = createToolRegistry({ skills: agentSkills, allowSubagent: false });
 const approvals = new Map<string, (approved: boolean) => void>();
 const busySessions = new Set<string>();
-const APPROVAL_TIMEOUT_MS = 120_000;
+const APPROVAL_TIMEOUT_MS = Number(process.env.TSA_APPROVAL_TIMEOUT_MS ?? "120000") || 120_000;
 
 type Emit = (event: unknown) => void;
 
 /** Ask the browser to approve a destructive tool call; resolves on its answer. */
-function requestApproval(emit: Emit, action: string, detail?: string): Promise<boolean> {
+function requestApproval(
+  emit: Emit,
+  action: string,
+  detail?: string,
+  track?: Set<string>,
+): Promise<boolean> {
   const id = randomUUID();
   return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
+    const done = (approved: boolean): void => {
+      track?.delete(id);
       approvals.delete(id);
+      resolve(approved);
+    };
+
+    const timer = setTimeout(() => {
       emit({ type: "approval_timeout", approvalId: id });
-      resolve(false);
+      done(false);
     }, APPROVAL_TIMEOUT_MS);
 
     approvals.set(id, (approved) => {
       clearTimeout(timer);
-      resolve(approved);
+      done(approved);
     });
+    track?.add(id);
 
     emit({ type: "approval", approvalId: id, action, detail: detail ?? "" });
   });
@@ -262,8 +273,19 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
     typeof payload.system === "string" ? payload.system.trim().slice(0, MAX_CONTENT) : "";
 
   const controller = new AbortController();
+  const myApprovals = new Set<string>();
   res.on("close", () => {
     if (!res.writableEnded) controller.abort();
+    // Tab is gone: nobody can answer these prompts, release them now
+    // instead of holding the session lock for the full timeout.
+    for (const id of myApprovals) {
+      const resolve = approvals.get(id);
+      if (resolve) {
+        approvals.delete(id);
+        resolve(false);
+      }
+    }
+    myApprovals.clear();
   });
 
   res.writeHead(200, { ...SSE_HEADERS, "x-model": entry.id, "x-session": session.id });
@@ -302,7 +324,7 @@ async function handleChat(req: http.IncomingMessage, res: http.ServerResponse): 
         }),
       onIteration: (index) => send({ type: "iteration", index }),
     },
-    approve: ({ action, detail }) => requestApproval(send, action, detail),
+    approve: ({ action, detail }) => requestApproval(send, action, detail, myApprovals),
     signal: () => controller.signal,
   });
 
@@ -378,8 +400,19 @@ async function handleOpenAI(req: http.IncomingMessage, res: http.ServerResponse)
   }
 
   const controller = new AbortController();
+  const myApprovals = new Set<string>();
   res.on("close", () => {
     if (!res.writableEnded) controller.abort();
+    // Tab is gone: nobody can answer these prompts, release them now
+    // instead of holding the session lock for the full timeout.
+    for (const id of myApprovals) {
+      const resolve = approvals.get(id);
+      if (resolve) {
+        approvals.delete(id);
+        resolve(false);
+      }
+    }
+    myApprovals.clear();
   });
 
   try {
@@ -497,6 +530,7 @@ const STATIC: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/markdown.mjs": { file: "markdown.mjs", type: "text/javascript; charset=utf-8" },
   "/style.css": { file: "style.css", type: "text/css; charset=utf-8" },
 };
 
@@ -534,7 +568,13 @@ const server = http.createServer((req, res) => {
 
   if (req.method === "GET") {
     if (pathname === "/api/health") {
-      json(res, 200, { ok: true, models: getCatalog().entries.length, source: getCatalog().source });
+      json(res, 200, {
+        ok: true,
+        models: getCatalog().entries.length,
+        source: getCatalog().source,
+        busySessions: busySessions.size,
+        pendingApprovals: approvals.size,
+      });
       return;
     }
     if (pathname === "/api/models") {

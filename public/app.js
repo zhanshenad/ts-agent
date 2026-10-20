@@ -1,4 +1,5 @@
-/* TsAgent web chat — vanilla JS, no build step. */
+/* TsAgent web chat — ES module, no build step. */
+import { escapeHtml, mdToHtml } from "./markdown.mjs";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -46,51 +47,6 @@ const els = {
 };
 
 let editingId = null;
-
-/* ---------------- helpers ---------------- */
-
-const escapeHtml = (s) =>
-  s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-
-function mdToHtml(src) {
-  const blocks = [];
-  let text = src.replace(/```([\w-]*)\r?\n?([\s\S]*?)```/g, (_m, _lang, code) => {
-    const i =
-      blocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`) - 1;
-    return `\u0000B${i}\u0000`;
-  });
-
-  text = escapeHtml(text);
-  text = text.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  text = text.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
-
-  text = text
-    .replace(/^### (.*)$/gm, "<h3>$1</h3>")
-    .replace(/^## (.*)$/gm, "<h2>$1</h2>")
-    .replace(/^# (.*)$/gm, "<h1>$1</h1>");
-
-  text = text.replace(/(?:^[-*] .*(?:\n|$))+/gm, (m) => {
-    const items = m
-      .trim()
-      .split("\n")
-      .map((line) => `<li>${line.replace(/^[-*] /, "")}</li>`)
-      .join("");
-    return `<ul>${items}</ul>`;
-  });
-
-  const html = text
-    .split(/\n{2,}/)
-    .map((chunk) => {
-      const t = chunk.trim();
-      if (!t) return "";
-      if (/^<(h[1-6]|ul|ol|pre|li|blockquote)/.test(t) || /^\u0000B\d+\u0000$/.test(t)) return t;
-      return `<p>${t.replace(/\n/g, "<br>")}</p>`;
-    })
-    .join("");
-
-  return html.replace(/\u0000B(\d+)\u0000/g, (_m, i) => blocks[Number(i)] ?? "");
-}
 
 function setStatus(text, isError = false) {
   els.status.textContent = text || "";
